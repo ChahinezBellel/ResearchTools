@@ -75,6 +75,14 @@ _RE_SHAPE_NAME = re.compile(r'<p:cNvPr\b[^>]*name="([^"]*)"')
 _RE_OFF = re.compile(r'<a:off\b[^>]*x="(-?\d+)"[^>]*y="(-?\d+)"')
 _RE_EXT = re.compile(r'<a:ext\b[^>]*cx="(\d+)"[^>]*cy="(\d+)"')
 _RE_EXTERNAL = re.compile(r'(?:src|href)\s*=\s*["\']https?://|url\(\s*["\']?https?://')
+# Any other reference a browser resolves when the page opens: an HTML src/href attribute
+# (not a property or a string in the deck's own script, hence the look-behind) and a CSS
+# url(). A relative path works on the build machine and breaks once the deck is copied.
+_RE_ATTR_REF = re.compile(r"(?<![\w.\-\"'])(?:src|href)\s*=\s*([\"'])(.*?)\1", re.IGNORECASE)
+_RE_CSS_URL = re.compile(r"url\(\s*([\"']?)([^\"')\s]+)\1\s*\)", re.IGNORECASE)
+# References that load nothing from outside the file.
+_INLINE_PREFIXES = ("data:", "#", "mailto:")
+_EXTERNAL_PREFIXES = ("http://", "https://")
 
 
 def find_plugin_validator(env: dict | None = None, pattern: str = PLUGIN_GLOB) -> str | None:
@@ -413,13 +421,20 @@ def check_web(path: str) -> list[str]:
     Purpose:
         Assert the web deck is what it claims to be: one self-contained file. A
         CDN font or a remote image is a deck that fails on a conference laptop
-        with no network, which is the situation it will meet.
+        with no network, which is the situation it will meet. A relative or
+        protocol-relative reference fails the same way, only later: it works on
+        the build machine and breaks once the deck is copied anywhere else.
+
+    Details:
+        data: URIs, #fragments and mailto: links load nothing and pass. An
+        http(s) reference keeps its original message and is reported once.
 
     Inputs:
         path (str): the .html file
 
     Outputs:
-        problems (list): one line per external reference found
+        problems (list): one line per external URL line, plus one per
+            non-inlined src/href attribute or CSS url() reference
     --------------------------------------------------------------------------
     """
     with open(path, encoding="utf8", errors="replace") as fh:
@@ -430,6 +445,19 @@ def check_web(path: str) -> list[str]:
             problems.append(
                 f"{TAG} {path}:{line_no} references an external URL; the web target must "
                 "inline every asset (data: URIs), or it breaks offline"
+            )
+        refs = [m.group(2) for m in _RE_ATTR_REF.finditer(line)]
+        refs += [m.group(2) for m in _RE_CSS_URL.finditer(line)]
+        for ref in refs:
+            value = ref.strip()
+            lowered = value.lower()
+            if (not value or lowered.startswith(_INLINE_PREFIXES)
+                    or lowered.startswith(_EXTERNAL_PREFIXES)):
+                continue
+            problems.append(
+                f"{TAG} {path}:{line_no} references {value!r}, which is not inlined; the "
+                "web target must embed every asset as a data: URI, or the deck breaks once "
+                "it leaves this machine"
             )
     return problems
 

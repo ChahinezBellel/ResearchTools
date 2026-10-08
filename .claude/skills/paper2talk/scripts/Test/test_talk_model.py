@@ -3,6 +3,7 @@ Offline tests for talk_model.py: every block kind survives the model, a renderer
 raises on a block it cannot draw instead of dropping it, and the budget the model
 computes is the same one talk_notes.py measures on the built deck.
 """
+import base64
 import io
 import json
 import contextlib
@@ -16,6 +17,7 @@ import _fixtures as fx  # noqa: E402
 
 import talk_model as tm  # noqa: E402
 import talk_notes as tn  # noqa: E402
+import talk_rules as rules  # noqa: E402
 
 BLOCK_SAMPLES = {
     "bullets": {"kind": "bullets", "items": ["a", "b"]},
@@ -122,6 +124,136 @@ class TestBudgetAgreement(unittest.TestCase):
         self.assertEqual(computed["n_content"], measured["cadence"]["n_content"])
 
 
+    def test_the_budgets_agree_on_a_deck_with_an_outline(self):
+        # An outline costs what a divider costs, in both places that count it.
+        notes = {1: " ".join(f"w{i}" for i in range(65)),
+                 2: " ".join(f"w{i}" for i in range(43)),
+                 3: " ".join(f"w{i}" for i in range(130))}
+        model = fx.model([
+            {"n": 1, "kind": "title", "title": "T", "blocks": [], "notes": notes[1]},
+            {"n": 2, "kind": "outline", "title": "Outline", "blocks": [], "notes": notes[2]},
+            {"n": 3, "kind": "content", "title": "A", "section": "Method",
+             "blocks": [BLOCK_SAMPLES["figure"]], "notes": notes[3] + " blink"},
+        ])
+        tmpdir = tempfile.mkdtemp()
+        model_path = os.path.join(tmpdir, "model.json")
+        with open(model_path, "w", encoding="utf8") as fh:
+            json.dump(model, fh)
+        deck = os.path.join(tmpdir, "deck.pptx")
+        fx.build_pptx(deck, [
+            {"body": "", "notes": notes[1]},
+            {"body": "", "notes": notes[2]},
+            {"body": fx.pic_xml(), "notes": model["slides"][2]["notes"]},
+        ])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            tn.main([deck, "--minutes", "13", "--model", model_path, "--json"])
+        measured = json.loads(buf.getvalue())
+        computed = tm.model_totals(model)
+        self.assertEqual(computed["n_content"], 1)
+        self.assertEqual(measured["cadence"]["n_content"], 1)
+        self.assertEqual(measured["cadence"]["n_divider"], 1)
+        self.assertEqual(computed["counts"]["divider"], 1)
+
+
+class TestOutlineKind(unittest.TestCase):
+    """outline is its own kind to draw and a divider to time; 1/3 min lives in one place."""
+
+    def _slides(self, *sections):
+        slides = [{"n": 1, "kind": "outline", "title": "Outline", "blocks": [],
+                   "notes": "the plan"}]
+        for i, section in enumerate(sections, start=2):
+            slides.append({"n": i, "kind": "content", "title": f"S{i}", "section": section,
+                           "blocks": [BLOCK_SAMPLES["figure"]], "notes": "blink"})
+        return slides
+
+    def test_outline_is_its_own_kind_and_a_divider_tier(self):
+        slide = {"n": 1, "kind": "outline"}
+        self.assertEqual(tm.slide_kind(slide), "outline")
+        self.assertEqual(tm.slide_tier(slide), "divider")
+
+    def test_the_divider_cost_is_not_duplicated(self):
+        self.assertEqual(rules.KIND_TIER, {"outline": "divider"})
+        self.assertNotIn("outline", rules.TIER_MINUTES)
+        self.assertEqual(set(rules.KINDS), set(rules.TIERS) | {"outline"})
+        self.assertEqual(rules.tier_words(rules.tier_of("outline")),
+                         rules.tier_words("divider"))
+
+    def test_an_outline_slide_is_budgeted_as_a_divider(self):
+        rows = tm.budget_rows(fx.model([
+            {"n": 1, "kind": "outline", "title": "O", "blocks": [], "notes": "x"},
+            {"n": 2, "kind": "divider", "title": "D", "blocks": [], "notes": "x"},
+        ]))
+        self.assertEqual(rows[0]["tier"], "divider")
+        self.assertEqual(rows[0]["target_words"], rows[1]["target_words"])
+
+    def test_tier_of_an_unknown_kind_raises(self):
+        with self.assertRaises(ValueError):
+            rules.tier_of("poster")
+
+    def test_an_unknown_kind_is_still_reported_by_validate_model(self):
+        problems = tm.validate_model(fx.model([
+            {"n": 1, "kind": "poster", "title": "P", "blocks": [], "notes": ""}]))
+        self.assertTrue(any("poster" in p for p in problems))
+
+    def test_outline_sections_are_distinct_and_in_order(self):
+        model = fx.model(self._slides("Intro", "Method", "Intro", "Results"))
+        self.assertEqual(tm.outline_sections(model), ["Intro", "Method", "Results"])
+
+    def test_an_outline_with_no_section_to_list_is_reported(self):
+        problems = tm.validate_model(fx.model(self._slides()))
+        # Not the unknown-kind message: the problem is that there is nothing to list.
+        self.assertTrue(any("outline" in p and "slide 1" in p and "section" in p
+                            for p in problems), problems)
+        self.assertFalse(any("declares kind" in p for p in problems), problems)
+
+    def test_a_template_lacking_outline_in_its_kinds_raises(self):
+        base = tempfile.mkdtemp()
+        template = os.path.join(base, "no_outline.html.j2")
+        with open(template, "w", encoding="utf8") as fh:
+            fh.write("{# supported-blocks: figure #}\n"
+                     "{# supported-kinds: title content divider thanks backup #}\nX\n")
+        with self.assertRaises(tm.RendererGap) as ctx:
+            tm.render_template(fx.model(self._slides("Intro")), template,
+                               os.path.join(base, "out.tex"))
+        self.assertIn("outline", str(ctx.exception))
+
+    def test_a_template_that_does_not_declare_kinds_accepts_outline(self):
+        # Negative control: undeclared kinds mean every known kind, like blocks.
+        base = tempfile.mkdtemp()
+        template = os.path.join(base, "plain.html.j2")
+        with open(template, "w", encoding="utf8") as fh:
+            fh.write("{# supported-blocks: figure #}\nX\n")
+        tm.render_template(fx.model(self._slides("Intro")), template,
+                           os.path.join(base, "out.tex"))
+
+    def test_the_beamer_template_declares_every_kind(self):
+        declared = tm.template_requirements(BEAMER_TEMPLATE)["supported-kinds"]
+        self.assertEqual(declared, set(rules.KINDS))
+
+    def test_the_beamer_outline_lists_the_sections_in_order(self):
+        base = tempfile.mkdtemp()
+        out = os.path.join(base, "main.tex")
+        tm.render_template(fx.model(self._slides("Intro", "Method", "Intro")),
+                           BEAMER_TEMPLATE, out)
+        with open(out, encoding="utf8") as fh:
+            tex = fh.read()
+        self.assertNotIn(r"\tableofcontents", tex)
+        first, second = tex.find(r"\item Intro"), tex.find(r"\item Method")
+        self.assertTrue(0 <= first < second, "sections missing or out of order")
+        self.assertEqual(tex.count(r"\item Intro"), 1)
+
+    def test_a_beamer_outline_with_no_sections_renders_no_empty_list(self):
+        # An empty itemize is a LaTeX error, so nothing is emitted rather than a list.
+        base = tempfile.mkdtemp()
+        out = os.path.join(base, "main.tex")
+        tm.render_template(fx.model(self._slides()), BEAMER_TEMPLATE, out)
+        with open(out, encoding="utf8") as fh:
+            tex = fh.read()
+        self.assertIn("Outline", tex)
+        self.assertNotRegex(tex, r"\\begin\{itemize\}\s*\\end\{itemize\}")
+
+
 class TestNumberIntegrity(unittest.TestCase):
     """No number reaches a slide unless the paper states it."""
 
@@ -163,6 +295,256 @@ class TestNumberIntegrity(unittest.TestCase):
         ])
         problems = tm.check_numbers(model, self.SOURCE)
         self.assertTrue(any("77.4" in p for p in problems))
+
+
+# Leading bytes of each accepted image type. The bodies after them are filler: the
+# signature is what embed_asset reads, and a real decoder never runs here.
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+GIF_BYTES = b"GIF89a" + b"\x00" * 32
+SVG_BYTES = b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+SVG_BARE_BYTES = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+HTML_BYTES = b"<!doctype html><html><body>not an image</body></html>"
+
+ASSETS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets")
+WEB_TEMPLATE = os.path.join(ASSETS_DIR, "web_skeleton.html.j2")
+BEAMER_TEMPLATE = os.path.join(ASSETS_DIR, "beamer_skeleton.tex.j2")
+
+
+class TestAssetEmbedding(unittest.TestCase):
+    """A web deck carries its figures inside the file; a path survives only off the web."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.root = os.path.join(self.base, "deck")
+        os.makedirs(os.path.join(self.root, "figures"))
+        self._write(os.path.join(self.root, "figures", "fig1.png"), PNG_BYTES)
+        # A real file OUTSIDE the root, so a refusal proves containment and not absence.
+        self.outside = os.path.join(self.base, "outside.png")
+        self._write(self.outside, PNG_BYTES)
+        self.cap = 1024
+
+    @staticmethod
+    def _write(path, data):
+        with open(path, "wb") as fh:
+            fh.write(data)
+
+    def _figure_model(self):
+        return fx.model([{"n": 1, "kind": "content", "title": "A figure",
+                          "blocks": [{"kind": "figure", "asset": "figures/fig1.png",
+                                      "caption": "Fig. 1", "keywords": ["probe"]}],
+                          "notes": "the probe figure"}])
+
+    def test_the_operator_cap_is_ten_mebibytes(self):
+        self.assertEqual(rules.WEB_ASSET_MAX_BYTES, 10 * 1024 * 1024)
+
+    def test_a_png_becomes_a_data_uri(self):
+        uri = tm.embed_asset("figures/fig1.png", self.root, self.cap)
+        self.assertTrue(uri.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(uri.split(",", 1)[1]), PNG_BYTES)
+
+    def test_jpeg_gif_and_svg_are_recognised(self):
+        cases = {"a.jpg": (JPEG_BYTES, "image/jpeg"), "a.gif": (GIF_BYTES, "image/gif"),
+                 "a.svg": (SVG_BYTES, "image/svg+xml"),
+                 "b.svg": (SVG_BARE_BYTES, "image/svg+xml")}
+        for name, (data, mime) in cases.items():
+            with self.subTest(name=name):
+                self._write(os.path.join(self.root, name), data)
+                uri = tm.embed_asset(name, self.root, self.cap)
+                self.assertTrue(uri.startswith(f"data:{mime};base64,"), uri[:40])
+
+    def test_a_missing_file_is_refused_by_name(self):
+        with self.assertRaises(tm.AssetError) as ctx:
+            tm.embed_asset("figures/absent.png", self.root, self.cap)
+        self.assertIn("figures/absent.png", str(ctx.exception))
+
+    def test_a_path_leaving_the_root_is_refused(self):
+        # The file exists in both cases: the refusal must come from containment (R24).
+        for path in ("../outside.png", self.outside):
+            with self.subTest(path=path):
+                with self.assertRaises(tm.AssetError) as ctx:
+                    tm.embed_asset(path, self.root, self.cap)
+                self.assertIn("outside", str(ctx.exception))
+
+    def test_a_drive_relative_path_is_refused(self):
+        # On Windows "C:x.png" means the current folder of drive C, not the root.
+        with self.assertRaises(tm.AssetError):
+            tm.embed_asset("C:outside.png", self.root, self.cap)
+
+    def test_a_png_whose_bytes_are_html_is_refused(self):
+        self._write(os.path.join(self.root, "figures", "fake.png"), HTML_BYTES)
+        with self.assertRaises(tm.AssetError) as ctx:
+            tm.embed_asset("figures/fake.png", self.root, self.cap)
+        self.assertIn("figures/fake.png", str(ctx.exception))
+
+    def test_a_file_over_the_cap_is_refused(self):
+        self._write(os.path.join(self.root, "figures", "big.png"),
+                    PNG_BYTES + b"\x00" * (self.cap + 1))
+        with self.assertRaises(tm.AssetError) as ctx:
+            tm.embed_asset("figures/big.png", self.root, self.cap)
+        self.assertIn("figures/big.png", str(ctx.exception))
+
+    def test_a_web_render_embeds_every_figure_and_passes_the_offline_check(self):
+        import talk_validate as tv
+        model = self._figure_model()
+        out = os.path.join(self.base, "deck.html")
+        tm.render_template(model, WEB_TEMPLATE, out, model_dir=self.root)
+        with open(out, encoding="utf8") as fh:
+            html = fh.read()
+        self.assertIn('src="data:image/png;base64,', html)
+        self.assertNotIn("figures/fig1.png", html)
+        self.assertEqual(tv.check_web(out), [])
+        # The caller's model is not rewritten behind its back.
+        self.assertNotIn("data_uri", model["slides"][0]["blocks"][0])
+
+    def test_a_web_render_with_figures_and_no_model_dir_is_refused(self):
+        with self.assertRaises(tm.AssetError):
+            tm.render_template(self._figure_model(), WEB_TEMPLATE,
+                               os.path.join(self.base, "deck.html"))
+
+    def test_a_beamer_render_keeps_the_plain_asset_path(self):
+        # Negative control: LaTeX resolves the file itself, so nothing is embedded.
+        out = os.path.join(self.base, "main.tex")
+        tm.render_template(self._figure_model(), BEAMER_TEMPLATE, out, model_dir=self.root)
+        with open(out, encoding="utf8") as fh:
+            tex = fh.read()
+        self.assertIn("figures/fig1.png", tex)
+        self.assertNotIn("data:image", tex)
+
+    def test_a_web_figure_without_an_asset_is_refused_cleanly(self):
+        # validate_model already reports it; the render must refuse, not raise KeyError.
+        model = self._figure_model()
+        del model["slides"][0]["blocks"][0]["asset"]
+        with self.assertRaises(tm.AssetError) as ctx:
+            tm.render_template(model, WEB_TEMPLATE, os.path.join(self.base, "deck.html"),
+                               model_dir=self.root)
+        self.assertIn("slide 1", str(ctx.exception))
+
+    def test_the_cli_refuses_a_figure_without_an_asset_with_exit_2(self):
+        model = self._figure_model()
+        del model["slides"][0]["blocks"][0]["asset"]
+        path = os.path.join(self.root, "talk_model.json")
+        with open(path, "w", encoding="utf8") as fh:
+            json.dump(model, fh)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = tm.main([path, "--render", WEB_TEMPLATE,
+                            "--out", os.path.join(self.base, "deck.html")])
+        self.assertEqual(code, 2)
+
+    def test_the_cli_refuses_a_missing_figure_with_exit_2(self):
+        model = self._figure_model()
+        model["slides"][0]["blocks"][0]["asset"] = "figures/absent.png"
+        path = os.path.join(self.root, "talk_model.json")
+        with open(path, "w", encoding="utf8") as fh:
+            json.dump(model, fh)
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = tm.main([path, "--render", WEB_TEMPLATE,
+                            "--out", os.path.join(self.base, "deck.html")])
+        self.assertEqual(code, 2)
+        self.assertIn("figures/absent.png", err.getvalue())
+
+
+# A template that needs the lab images declares it in its header, the same way it
+# declares its blocks. These small templates stand in for the real ones, which do
+# not declare it yet (plan2 Task 6).
+LAB_TEMPLATE = ("{# supported-blocks: bullets #}\n"
+                "{# requires: lab-assets #}\n"
+                "BANNER={{ lab.banner }}\nLOGO={{ lab.logo }}\n")
+PLAIN_TEMPLATE = "{# supported-blocks: bullets #}\nTITLE={{ meta.title }}\n"
+
+
+class TestLabAssets(unittest.TestCase):
+    """The lab images come from the gabarit folder named at render time, never a copy."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.lab = os.path.join(self.base, "gabarit_slides")
+        os.makedirs(self.lab)
+        self.banner = os.path.join(self.lab, rules.LAB_ASSET_FILES["banner"])
+        self.logo = os.path.join(self.lab, rules.LAB_ASSET_FILES["logo"])
+        for path, data in ((self.banner, JPEG_BYTES), (self.logo, PNG_BYTES)):
+            with open(path, "wb") as fh:
+                fh.write(data)
+        self.lab_template = self._template("lab_skeleton.html.j2", LAB_TEMPLATE)
+        self.plain_template = self._template("plain_skeleton.html.j2", PLAIN_TEMPLATE)
+        self.model = fx.model([{"n": 1, "kind": "content", "title": "T",
+                                "blocks": [{"kind": "bullets", "items": ["a"]}],
+                                "notes": "a"}], title="Probe deck")
+        self.model_path = os.path.join(self.base, "talk_model.json")
+        with open(self.model_path, "w", encoding="utf8") as fh:
+            json.dump(self.model, fh)
+        self.out = os.path.join(self.base, "deck.html")
+
+    def _template(self, name, text):
+        path = os.path.join(self.base, name)
+        with open(path, "w", encoding="utf8") as fh:
+            fh.write(text)
+        return path
+
+    def _main(self, *extra):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = tm.main([self.model_path, "--render", self.lab_template,
+                            "--out", self.out, *extra])
+        return code, err.getvalue()
+
+    def test_the_canonical_filenames_are_the_operator_approved_ones(self):
+        self.assertEqual(rules.LAB_ASSET_FILES,
+                         {"banner": "en-tete1260.jpg", "logo": "LogoLARI_FINAL.png"})
+
+    def test_the_header_declares_blocks_kinds_and_requirements(self):
+        path = self._template("full.html.j2",
+                              "{# supported-blocks: bullets figure #}\n"
+                              "{# supported-kinds: title content #}\n"
+                              "{# requires: lab-assets #}\n<html></html>\n")
+        reqs = tm.template_requirements(path)
+        self.assertEqual(reqs["supported-blocks"], {"bullets", "figure"})
+        self.assertEqual(reqs["supported-kinds"], {"title", "content"})
+        self.assertEqual(reqs["requires"], {"lab-assets"})
+
+    def test_an_undeclared_requirement_is_empty(self):
+        self.assertEqual(tm.template_requirements(self.plain_template)["requires"], set())
+
+    def test_load_lab_assets_returns_one_data_uri_per_role(self):
+        lab = tm.load_lab_assets(self.lab)
+        self.assertTrue(lab["banner"].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(lab["logo"].startswith("data:image/png;base64,"))
+
+    def test_a_requiring_template_without_lab_dir_exits_2(self):
+        code, err = self._main()
+        self.assertEqual(code, 2)
+        self.assertIn("--lab-dir", err)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_a_lab_folder_missing_the_logo_exits_2_naming_it(self):
+        os.remove(self.logo)
+        code, err = self._main("--lab-dir", self.lab)
+        self.assertEqual(code, 2)
+        self.assertIn("LogoLARI_FINAL.png", err)
+
+    def test_a_lab_folder_that_does_not_exist_exits_2_naming_it(self):
+        missing = os.path.join(self.base, "no_such_folder")
+        code, err = self._main("--lab-dir", missing)
+        self.assertEqual(code, 2)
+        self.assertIn("no_such_folder", err)
+
+    def test_the_context_holds_both_lab_images_as_data_uris(self):
+        # Exit 1 here is the model's own content rule (a text-only slide), reported
+        # after the render; exit 2 would be the refusal this test rules out.
+        code, _ = self._main("--lab-dir", self.lab)
+        self.assertNotEqual(code, 2)
+        with open(self.out, encoding="utf8") as fh:
+            text = fh.read()
+        self.assertIn("BANNER=data:image/jpeg;base64,", text)
+        self.assertIn("LOGO=data:image/png;base64,", text)
+
+    def test_a_template_without_the_requirement_renders_without_the_flag(self):
+        # Negative control: the Beamer and current web templates must keep working.
+        tm.render_template(self.model, self.plain_template, self.out)
+        with open(self.out, encoding="utf8") as fh:
+            self.assertIn("TITLE=Probe deck", fh.read())
 
 
 if __name__ == "__main__":

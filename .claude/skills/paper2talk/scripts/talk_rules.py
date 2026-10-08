@@ -49,6 +49,39 @@ TIER_MINUTES: dict[str, float] = {
 
 TIERS = tuple(TIER_MINUTES)
 
+# Slide kinds that are drawn differently but timed like an existing tier. The kind
+# decides the layout; the tier decides the cost, so no second timing value exists.
+# Provenance: an outline is timed as a divider, chosen by the operator, 2026-10-08
+# (Issue #53).
+KIND_TIER: dict[str, str] = {
+    "outline": "divider",
+}
+
+KINDS = TIERS + tuple(KIND_TIER)
+
+
+def tier_of(kind: str) -> str:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Name the budget tier a slide kind is timed as.
+
+    Inputs:
+        kind (str): a slide kind (a tier, or a key of KIND_TIER)
+
+    Outputs:
+        tier (str): a key of TIER_MINUTES
+
+    Raises:
+        ValueError: the kind is neither a tier nor a key of KIND_TIER.
+    --------------------------------------------------------------------------
+    """
+    if kind in TIER_MINUTES:
+        return kind
+    if kind in KIND_TIER:
+        return KIND_TIER[kind]
+    raise ValueError(f"{TAG} unknown slide kind {kind!r}; expected one of {', '.join(KINDS)}")
+
 # Audience profiles. Question 1 of the opening round selects one, and it
 # parameterises typography, density, equation policy and cadence. The 20 pt floor
 # and the bullet cap are executive and marketing conventions; they hold only for
@@ -108,6 +141,33 @@ ASPECTS: dict[str, tuple[float, float]] = {
     "4:3": (10.0, 7.5),
     "16:9": (13.333, 7.5),
     "9:16": (7.5, 13.333),
+}
+
+# Largest single file the web target embeds as a data: URI, in bytes. Provenance:
+# chosen by the operator, 2026-10-08 (Issue #53, plan1 Task 0). A figure above it is
+# refused, not shrunk, so an oversized export is fixed at its source.
+WEB_ASSET_MAX_BYTES = 10 * 1024 * 1024
+
+# Image types the web target embeds, identified by their leading bytes rather than
+# by the file extension, so a renamed HTML or script file is never inlined as a
+# figure. Provenance: the PNG, JPEG (JFIF/EXIF SOI marker) and GIF87a/GIF89a
+# signatures as published in each format's specification. SVG has no fixed leading
+# bytes and is recognised separately, by its root element.
+IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+SVG_MIME = "image/svg+xml"
+
+# The two lab images a LARI web deck embeds, by role, as named in the canonical
+# gabarit folder (gabarit_these_maitrise_DSA_UQAC/src/slides/). The folder itself is
+# passed at render time (--lab-dir) and never copied into this repository.
+# Provenance: chosen by the operator, 2026-10-08 (Issue #53, plan1 Task 0).
+LAB_ASSET_FILES: dict[str, str] = {
+    "banner": "en-tete1260.jpg",
+    "logo": "LogoLARI_FINAL.png",
 }
 
 

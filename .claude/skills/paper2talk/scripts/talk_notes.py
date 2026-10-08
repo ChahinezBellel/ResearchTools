@@ -280,12 +280,17 @@ def tiers_from_model(model: dict) -> dict[str, set[int]]:
         tiers (dict): tier name -> set of slide numbers (content is left implicit)
     --------------------------------------------------------------------------
     """
-    tiers: dict[str, set[int]] = {"title": set(), "thanks": set(),
-                                  "divider": set(), "backup": set()}
+    # The tier list and the kind-to-tier map both come from talk_rules: an outline
+    # is counted as a divider here exactly as the model budgets it.
+    tiers: dict[str, set[int]] = {t: set() for t in rules.TIERS if t != "content"}
     for slide in model.get("slides", []):
         kind = str(slide.get("kind", "content")).strip().lower()
-        if kind in tiers:
-            tiers[kind].add(slide.get("n"))
+        try:
+            tier = rules.tier_of(kind)
+        except ValueError:
+            continue  # unknown kind: left implicit as content; validate_model reports it
+        if tier in tiers:
+            tiers[tier].add(slide.get("n"))
     return tiers
 
 

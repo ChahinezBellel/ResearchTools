@@ -1,4 +1,5 @@
 ((# supported-blocks: bullets figure takeaway cards chips stats table matrix zoneband chart equation #))
+((# supported-kinds: title outline content divider thanks backup #))
 %% ---------------------------------------------------------------------------
 %% Beamer render of talk_model.json, on the canonical lab gabarit
 %%   gabarit_these_maitrise_DSA_UQAC/src/slides/main.tex
@@ -99,6 +100,19 @@
 ((* if s.kind == "title" *))
 \begin{frame}[plain]
   \titlepage
+\end{frame}
+((* if s.notes *))\note{((( s.notes )))}
+((* endif *))
+((* elif s.kind == "outline" *))
+%% Outline: the model's own sections, in order. Not Beamer's table of contents,
+%% since this skeleton emits no section commands; and no list at all when there is
+%% nothing to list, because an empty itemize does not compile.
+\begin{frame}{((( s.title )))}
+((* if sections *))
+  \begin{itemize}
+((* for name in sections *))    \item ((( name )))
+((* endfor *))  \end{itemize}
+((* endif *))
 \end{frame}
 ((* if s.notes *))\note{((( s.notes )))}
 ((* endif *))

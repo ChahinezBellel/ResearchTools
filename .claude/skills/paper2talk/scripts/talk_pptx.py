@@ -56,6 +56,10 @@ LAYOUT_PATTERNS: dict[str, tuple[str, ...]] = {
     "thanks": (r"^fin$", r"merci", r"thank"),
     "backup": (r"^vide$", r"^blank$", r"^1-\s*contenu", r"contenu", r"content"),
 }
+# An outline is drawn on the gabarit's agenda layout when it has one (the 16:9 file
+# names it "Programme"), and on an ordinary content layout otherwise.
+LAYOUT_PATTERNS["outline"] = (r"^programme$", r"sommaire", r"outline", r"agenda",
+                              *LAYOUT_PATTERNS["content"])
 
 # Semantic triad reused when a block names no colour of its own.
 DEFAULT_PALETTE = {
@@ -103,18 +107,19 @@ def layouts_of(prs) -> list:
     return seen
 
 
-def pick_layout(prs, tier: str, wanted: str | None = None):
+def pick_layout(prs, kind: str, wanted: str | None = None):
     """
     --------------------------------------------------------------------------
     Purpose:
         Choose the gabarit layout a slide is built on. An explicit name always
-        wins; otherwise the tier's ordered patterns are matched against the
+        wins; otherwise the kind's ordered patterns are matched against the
         layout names, so the branded `1- Contenu` is preferred over a generic
         `Titre et contenu` and both over nothing.
 
     Inputs:
         prs: the opened Presentation
-        tier (str): content, title, thanks, divider, or backup
+        kind (str): a slide kind: content, title, thanks, divider, backup or
+            outline (an outline prefers an agenda layout, then a content one)
         wanted (str): an explicit layout name from the model or --layout-map
 
     Outputs:
@@ -130,7 +135,7 @@ def pick_layout(prs, tier: str, wanted: str | None = None):
             f"{TAG} layout {wanted!r} is not in the template; available: "
             + ", ".join(sorted(lay.name for lay in available))
         )
-    for pattern in LAYOUT_PATTERNS.get(tier, ()):
+    for pattern in LAYOUT_PATTERNS.get(kind, ()):
         for layout in available:
             if re.search(pattern, layout.name.strip(), re.I):
                 return layout
@@ -235,13 +240,14 @@ def render(model: dict, template: str, out_path: str,
     --------------------------------------------------------------------------
     Purpose:
         Build the deck on the gabarit: one slide per model entry, on the layout
-        its tier selects, with the speaker notes in the notes pane.
+        its kind selects, with the speaker notes in the notes pane. An outline
+        slide's body lists the model's sections in order.
 
     Inputs:
         model (dict): a parsed talk_model.json
         template (str): the gabarit .pptx (opened, never written to)
         out_path (str): destination deck
-        layout_map (dict): tier -> layout name overrides
+        layout_map (dict): kind or tier -> layout name overrides (the kind wins)
         verbose (bool): print the layout chosen for each slide
 
     Outputs:
@@ -280,10 +286,12 @@ def render(model: dict, template: str, out_path: str,
         print(f"{TAG} canvas {canvas_in[0]:.3f} x {canvas_in[1]:.3f} in "
               f"({len(layouts_of(prs))} layouts available)")
 
+    sections = tm.outline_sections(model)
     for entry in model.get("slides", []):
+        kind = tm.slide_kind(entry)
         tier = tm.slide_tier(entry)
-        wanted = entry.get("layout") or layout_map.get(tier)
-        layout = pick_layout(prs, tier, wanted)
+        wanted = entry.get("layout") or layout_map.get(kind) or layout_map.get(tier)
+        layout = pick_layout(prs, kind, wanted)
         slide = prs.slides.add_slide(layout)
         set_title(slide, entry.get("title", ""), title_pt, palette)
 
@@ -294,7 +302,11 @@ def render(model: dict, template: str, out_path: str,
         def remaining():
             return max(Inches(0.4), bottom - cursor)
 
-        for block in entry.get("blocks", []):
+        blocks = list(entry.get("blocks", []))
+        if kind == "outline" and sections:
+            # The outline's body is the model's own sections, drawn as a list.
+            blocks.insert(0, {"kind": "bullets", "items": sections})
+        for block in blocks:
             kind = block.get("kind")
             if kind == "bullets":
                 items = block["items"]

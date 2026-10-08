@@ -24,6 +24,8 @@ or usage error.
 from __future__ import annotations
 
 import argparse
+import base64
+import copy
 import json
 import os
 import sys
@@ -55,8 +57,10 @@ BLOCK_KINDS: dict[str, tuple[str, ...]] = {
 # pure prose.
 EXHIBIT_KINDS = frozenset({"figure", "table", "chart", "matrix", "zoneband", "equation"})
 
-# Slide tiers, mirroring talk_rules.TIER_MINUTES.
+# Slide tiers, mirroring talk_rules.TIER_MINUTES, and the slide kinds a model may
+# declare (every tier plus the kinds talk_rules.KIND_TIER times as one of them).
 SLIDE_TIERS = frozenset(rules.TIERS)
+SLIDE_KINDS = frozenset(rules.KINDS)
 
 # Jinja delimiters for a LaTeX target. The defaults collide with LaTeX braces -
 # `\titlegraphic{%` reads as a Jinja block start and the template never compiles.
@@ -72,6 +76,10 @@ LATEX_DELIMITERS = {
 
 class RendererGap(Exception):
     """A renderer was handed a block kind it cannot draw."""
+
+
+class AssetError(ValueError):
+    """An asset the web target must embed is missing, outside its root, too large, or not an image."""
 
 
 def load(path: str) -> dict:
@@ -95,28 +103,73 @@ def load(path: str) -> dict:
         raise ValueError(f"{TAG} {path} is not valid JSON: {exc}") from exc
 
 
+def slide_kind(slide: dict) -> str:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Read a slide's kind from the model: what the renderers draw. The kind is
+        declared, never inferred from position: a deck reordered by hand keeps its
+        declarations and loses its positions.
+
+    Inputs:
+        slide (dict): one entry of model["slides"]
+
+    Outputs:
+        kind (str): one of talk_rules.KINDS
+
+    Raises:
+        ValueError: the slide declares a kind that talk_rules does not know.
+    --------------------------------------------------------------------------
+    """
+    kind = str(slide.get("kind", "content")).strip().lower()
+    if kind not in SLIDE_KINDS:
+        raise ValueError(
+            f"{TAG} slide {slide.get('n')} declares kind {kind!r}; "
+            f"expected one of {', '.join(sorted(SLIDE_KINDS))}"
+        )
+    return kind
+
+
 def slide_tier(slide: dict) -> str:
     """
     --------------------------------------------------------------------------
     Purpose:
-        Read a slide's tier from the model. The tier is declared, never inferred
-        from position: a deck reordered by hand keeps its declarations and loses
-        its positions.
+        Read the budget tier a slide is timed as: its kind, resolved through
+        talk_rules.tier_of (an outline is timed as a divider).
 
     Inputs:
         slide (dict): one entry of model["slides"]
 
     Outputs:
         tier (str): content, title, thanks, divider, or backup
+
+    Raises:
+        ValueError: the slide declares a kind that talk_rules does not know.
     --------------------------------------------------------------------------
     """
-    tier = str(slide.get("kind", "content")).strip().lower()
-    if tier not in SLIDE_TIERS:
-        raise ValueError(
-            f"{TAG} slide {slide.get('n')} declares tier {tier!r}; "
-            f"expected one of {', '.join(sorted(SLIDE_TIERS))}"
-        )
-    return tier
+    return rules.tier_of(slide_kind(slide))
+
+
+def outline_sections(model: dict) -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        List what an outline slide shows: the distinct section names the model's
+        slides declare, in the order they first appear.
+
+    Inputs:
+        model (dict): a parsed talk_model.json
+
+    Outputs:
+        sections (list): distinct non-empty `section` values, first occurrence first
+    --------------------------------------------------------------------------
+    """
+    sections: list[str] = []
+    for slide in model.get("slides", []):
+        name = str(slide.get("section") or "").strip()
+        if name and name not in sections:
+            sections.append(name)
+    return sections
 
 
 def exhibits(slide: dict) -> list[dict]:
@@ -198,6 +251,9 @@ def validate_model(model: dict, audience: str | None = None) -> list[str]:
             continue
         if not str(slide.get("title", "")).strip() and tier != "backup":
             problems.append(f"{TAG} slide {n} has no title")
+        if slide_kind(slide) == "outline" and not outline_sections(model):
+            problems.append(f"{TAG} slide {n} is an outline, but no slide declares a "
+                            "section for it to list")
 
         for block in slide.get("blocks", []):
             kind = block.get("kind")
@@ -299,24 +355,34 @@ def check_numbers(model: dict, source_numbers) -> list[str]:
     return problems
 
 
-def assert_renderable(model: dict, supported: set[str] | frozenset[str], renderer: str) -> None:
+def assert_renderable(model: dict, supported: set[str] | frozenset[str], renderer: str,
+                      kinds: set[str] | frozenset[str] | None = None) -> None:
     """
     --------------------------------------------------------------------------
     Purpose:
-        Refuse to render a model containing a block the renderer cannot draw. The
-        alternative, dropping it, produces a deck that looks finished and is
-        missing an argument.
+        Refuse to render a model containing a block, or a slide kind, the renderer
+        cannot draw. The alternative, dropping it, produces a deck that looks
+        finished and is missing an argument.
 
     Inputs:
         model (dict): a parsed talk_model.json
         supported (set): block kinds this renderer implements
         renderer (str): renderer name, for the message
+        kinds (set | None): slide kinds this renderer implements; None when the
+            renderer does not declare them, which accepts every known kind
 
     Outputs:
-        None. Raises RendererGap naming the renderer, the slide and the block.
+        None. Raises RendererGap naming the renderer, the slide and the block or kind.
     --------------------------------------------------------------------------
     """
     for slide in model.get("slides", []):
+        if kinds is not None:
+            kind = str(slide.get("kind", "content")).strip().lower()
+            if kind not in kinds:
+                raise RendererGap(
+                    f"{TAG} renderer {renderer} cannot draw slide kind {kind!r} on slide "
+                    f"{slide.get('n')}; implement it or change the slide"
+                )
         for block in slide.get("blocks", []):
             kind = block.get("kind")
             if kind not in supported:
@@ -407,13 +473,47 @@ def supported_blocks(template_path: str) -> set[str]:
         kinds (set): the declared block kinds; all known kinds when undeclared
     --------------------------------------------------------------------------
     """
+    declared = template_requirements(template_path)["supported-blocks"]
+    return set(BLOCK_KINDS) if declared is None else declared
+
+
+# Header keys a template may declare, one per comment line at the top of the file.
+_HEADER_KEYS = ("supported-blocks", "supported-kinds", "requires")
+
+
+def template_requirements(template_path: str) -> dict:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Read what a Jinja template declares about itself in its header: the block
+        kinds it draws, the slide kinds it draws, and what it needs at render time.
+
+    Details:
+        The header is the run of comment lines at the top of the file, in either
+        delimiter the templates use ({# ... #} for HTML, ((# ... #)) for LaTeX).
+        Each line holds one "key: value value ..." declaration. Reading stops at
+        the first line that is not a comment.
+
+    Inputs:
+        template_path (str): path to the .j2 template
+
+    Outputs:
+        declared (dict): "supported-blocks" and "supported-kinds" as sets, or None
+            when undeclared; "requires" as a set, empty when undeclared
+    --------------------------------------------------------------------------
+    """
+    declared: dict = {"supported-blocks": None, "supported-kinds": None, "requires": set()}
     with open(template_path, encoding="utf8") as fh:
-        head = fh.readline()
-    marker = "supported-blocks:"
-    if marker not in head:
-        return set(BLOCK_KINDS)
-    payload = head.split(marker, 1)[1].replace("#}", " ").replace("#))", " ").strip()
-    return {k for k in payload.split() if k}
+        for line in fh:
+            text = line.strip()
+            if not text.startswith(("{#", "((#")):
+                break
+            body = text.lstrip("{(#").replace("#}", " ").replace("#))", " ").strip()
+            key, sep, payload = body.partition(":")
+            key = key.strip()
+            if sep and key in _HEADER_KEYS:
+                declared[key] = {v for v in payload.split() if v}
+    return declared
 
 
 _LATEX_ESCAPES = (
@@ -444,20 +544,179 @@ def latex_escape(text: str) -> str:
     return text
 
 
-def render_template(model: dict, template_path: str, out_path: str) -> str:
+def _image_mime(head: bytes) -> str | None:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Name the image type of a file from its leading bytes, never its extension.
+
+    Details:
+        SVG has no fixed signature: it is accepted when, after an optional BOM,
+        whitespace and XML declaration, the first element is <svg.
+
+    Inputs:
+        head (bytes): the start of the file
+
+    Outputs:
+        mime (str | None): the MIME type, or None when the bytes are not an image
+            type the web target accepts
+    --------------------------------------------------------------------------
+    """
+    for signature, mime in rules.IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return mime
+    text = head.lstrip(b"\xef\xbb\xbf").lstrip()
+    if text.startswith(b"<?xml"):
+        end = text.find(b"?>")
+        text = text[end + 2:].lstrip() if end != -1 else b""
+    if text.startswith(b"<svg"):
+        return rules.SVG_MIME
+    return None
+
+
+def embed_asset(path: str, root: str, max_bytes: int) -> str:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Read one asset referenced by the model and return it as a data: URI, so a
+        web deck carries its figures inside the file.
+
+    Details:
+        The path is resolved against root FIRST (symlinks, "..", absolute and
+        drive-relative forms included) and only then compared with root, so a
+        containment check never runs on the unresolved string (R24).
+
+    Inputs:
+        path (str): the asset as written in the model, relative to root
+        root (str): the folder the model's asset paths are relative to
+        max_bytes (int): the largest file accepted
+
+    Outputs:
+        uri (str): "data:<mime>;base64,<payload>"
+
+    Raises:
+        AssetError: the path resolves outside root, the file is missing, it is
+            larger than max_bytes, or its leading bytes are not a recognised image.
+    --------------------------------------------------------------------------
+    """
+    root_real = os.path.realpath(root)
+    target = os.path.realpath(os.path.join(root_real, path))
+    try:
+        inside = os.path.commonpath([root_real, target]) == root_real
+    except ValueError:  # different drives on Windows
+        inside = False
+    if not inside:
+        raise AssetError(f"{TAG} asset {path!r} resolves outside {root!r}; refused")
+    if not os.path.isfile(target):
+        raise AssetError(f"{TAG} asset {path!r} not found under {root!r}")
+    size = os.path.getsize(target)
+    if size > max_bytes:
+        raise AssetError(f"{TAG} asset {path!r} is {size} bytes, over the {max_bytes}-byte "
+                         "cap for an embedded file; re-export it smaller")
+    with open(target, "rb") as fh:
+        data = fh.read()
+    mime = _image_mime(data)
+    if mime is None:
+        raise AssetError(f"{TAG} asset {path!r} is not a recognised image (PNG, JPEG, GIF "
+                         "or SVG by its content); refused")
+    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _embed_figures(model: dict, model_dir: str | None) -> dict:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Return a copy of the model whose figure blocks carry data_uri, for the web
+        target. The caller's model is left as it was.
+
+    Inputs:
+        model (dict): a parsed talk_model.json
+        model_dir (str | None): the folder figure assets are relative to
+
+    Outputs:
+        model (dict): a deep copy with data_uri set on every figure block
+
+    Raises:
+        AssetError: a figure is present and model_dir is None, or embed_asset
+            refuses one of the figures.
+    --------------------------------------------------------------------------
+    """
+    embedded = copy.deepcopy(model)
+    for slide in embedded.get("slides", []):
+        for block in slide.get("blocks", []):
+            if block.get("kind") != "figure":
+                continue
+            if not block.get("asset"):
+                raise AssetError(f"{TAG} slide {slide.get('n')}: a figure block has no "
+                                 "'asset' to embed")
+            if model_dir is None:
+                raise AssetError(f"{TAG} slide {slide.get('n')}: a web render needs the "
+                                 "model's folder to embed figure assets")
+            block["data_uri"] = embed_asset(block["asset"], model_dir,
+                                            rules.WEB_ASSET_MAX_BYTES)
+    return embedded
+
+
+def load_lab_assets(lab_dir: str) -> dict[str, str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Read the lab images (banner and logo) from the gabarit folder named at
+        render time, as data: URIs. The folder is the source of truth: no copy of
+        either image lives in this repository.
+
+    Inputs:
+        lab_dir (str): the lab gabarit folder holding rules.LAB_ASSET_FILES
+
+    Outputs:
+        lab (dict): role ("banner", "logo") to data: URI
+
+    Raises:
+        AssetError: the folder does not exist, or embed_asset refuses one of the
+            files (missing, too large, not an image).
+    --------------------------------------------------------------------------
+    """
+    if not os.path.isdir(lab_dir):
+        raise AssetError(f"{TAG} lab folder {lab_dir!r} not found; pass the gabarit "
+                         "slides folder with --lab-dir")
+    return {role: embed_asset(name, lab_dir, rules.WEB_ASSET_MAX_BYTES)
+            for role, name in rules.LAB_ASSET_FILES.items()}
+
+
+def render_template(model: dict, template_path: str, out_path: str, *,
+                    model_dir: str | None = None, lab_dir: str | None = None) -> str:
     """
     --------------------------------------------------------------------------
     Purpose:
         Render the model through a Jinja template (the Beamer and web targets),
-        after checking that the template implements every block the model uses.
+        after checking that the template implements every block and slide kind
+        the model uses.
+
+    Details:
+        For an .html output every figure is embedded as a data: URI, so the deck
+        stays one file. Any other output keeps the plain asset paths. Every
+        template receives `sections` (outline_sections), what an outline lists. A
+        template whose header declares "requires: lab-assets" also receives `lab`,
+        the banner and logo read from lab_dir; one that does not declare it
+        renders exactly as before.
 
     Inputs:
         model (dict): a parsed talk_model.json
         template_path (str): assets/beamer_skeleton.tex.j2 or web_skeleton.html.j2
         out_path (str): destination file
+        model_dir (str | None): the folder figure assets are relative to; required
+            for an .html output that has figures
+        lab_dir (str | None): the lab gabarit folder; required when the template
+            declares "requires: lab-assets"
 
     Outputs:
         out_path (str): the file written
+
+    Raises:
+        AssetError: an .html render cannot embed one of its figures, or a template
+            requiring lab assets gets no usable lab_dir.
+        RendererGap: the template does not implement a block or a slide kind the
+            model uses.
     --------------------------------------------------------------------------
     """
     try:
@@ -468,7 +727,18 @@ def render_template(model: dict, template_path: str, out_path: str) -> str:
                            "pip install jinja2") from exc
 
     folder, name = os.path.split(os.path.abspath(template_path))
-    assert_renderable(model, supported_blocks(template_path), name)
+    declared = template_requirements(template_path)
+    assert_renderable(model, supported_blocks(template_path), name,
+                      declared["supported-kinds"])
+    context = dict(model)
+    context["sections"] = outline_sections(model)
+    if "lab-assets" in declared["requires"]:
+        if lab_dir is None:
+            raise AssetError(f"{TAG} {name} requires the lab assets; pass the gabarit "
+                             "slides folder with --lab-dir")
+        context["lab"] = load_lab_assets(lab_dir)
+    if out_path.lower().endswith((".html", ".htm")):
+        context.update(_embed_figures(model, model_dir))
     # Escaping is decided by what is being written, not by the template's suffix:
     # every template here ends in .j2, so select_autoescape would never fire and a
     # title containing an ampersand would break the web deck.
@@ -493,7 +763,7 @@ def render_template(model: dict, template_path: str, out_path: str) -> str:
     env = Environment(**options)
     if is_tex:
         env.filters["raw_tex"] = lambda v: Markup("" if v is None else str(v))
-    text = env.get_template(name).render(**model)
+    text = env.get_template(name).render(**context)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     with open(out_path, "w", encoding="utf8") as fh:
         fh.write(text)
@@ -507,6 +777,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wpm", type=float, default=rules.DEFAULT_WPM)
     ap.add_argument("--render", help="a Jinja template to render the model through")
     ap.add_argument("--out", help="destination file for --render")
+    ap.add_argument("--lab-dir", help="the lab gabarit slides folder holding the banner and "
+                                      "logo; required by a template declaring "
+                                      "'requires: lab-assets'")
     ap.add_argument("--check-numbers", metavar="SOURCE",
                     help="a paper_extract.py inventory (.json) or the paper itself: "
                          "flag any number on a slide the paper does not state")
@@ -548,8 +821,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{TAG} --render needs --out", file=sys.stderr)
             return 2
         try:
-            written = render_template(model, args.render, args.out)
-        except (OSError, RuntimeError, RendererGap) as exc:
+            written = render_template(model, args.render, args.out,
+                                      model_dir=os.path.dirname(os.path.abspath(args.model)),
+                                      lab_dir=args.lab_dir)
+        except (OSError, RuntimeError, RendererGap, AssetError) as exc:
             print(f"{TAG} {exc}", file=sys.stderr)
             return 2
         print(f"{TAG} rendered {args.render} -> {written}")

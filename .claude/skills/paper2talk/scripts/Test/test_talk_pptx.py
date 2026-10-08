@@ -74,6 +74,35 @@ class TestLayoutSelection(unittest.TestCase):
             )
 
 
+class _Layout:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Prs:
+    """The two attributes pick_layout reads, so layout choice is testable without pptx."""
+
+    def __init__(self, *names):
+        master = type("Master", (), {"slide_layouts": [_Layout(n) for n in names]})()
+        self.slide_masters = [master]
+
+
+class TestOutlineLayout(unittest.TestCase):
+    def test_an_outline_prefers_the_programme_layout(self):
+        prs = _Prs("1- Titre", "1- Contenu", "Programme", "Page separatrice")
+        self.assertEqual(tp.pick_layout(prs, "outline").name, "Programme")
+
+    def test_an_outline_without_a_programme_layout_falls_back_to_content(self):
+        prs = _Prs("1- Titre", "1- Contenu", "Page separatrice")
+        self.assertEqual(tp.pick_layout(prs, "outline").name, "1- Contenu")
+
+    def test_the_other_outline_names_are_matched(self):
+        for name in ("Sommaire", "Outline", "Agenda"):
+            with self.subTest(name=name):
+                prs = _Prs("1- Titre", "1- Contenu", name)
+                self.assertEqual(tp.pick_layout(prs, "outline").name, name)
+
+
 class TestRender(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -99,6 +128,25 @@ class TestRender(unittest.TestCase):
                   self.template, self.out, verbose=False)
         prs = Presentation(self.out)
         self.assertEqual(len(prs.slides), 2)          # the model's two, not the samples
+
+    def test_an_outline_slide_lists_the_sections_in_order(self):
+        from pptx import Presentation
+
+        model = fx.model([
+            {"n": 1, "kind": "outline", "title": "Outline", "blocks": [], "notes": "plan"},
+            {"n": 2, "kind": "content", "title": "A", "section": "Intro",
+             "blocks": [{"kind": "figure", "asset": self.fig, "keywords": ["fig"]}],
+             "notes": "fig"},
+            {"n": 3, "kind": "content", "title": "B", "section": "Method",
+             "blocks": [{"kind": "figure", "asset": self.fig, "keywords": ["fig"]}],
+             "notes": "fig"},
+        ])
+        tp.render(model, self.template, self.out, verbose=False)
+        text = " | ".join(shape.text_frame.text
+                          for shape in Presentation(self.out).slides[0].shapes
+                          if shape.has_text_frame)
+        self.assertLess(text.find("Intro"), text.find("Method"))
+        self.assertGreaterEqual(text.find("Intro"), 0)
 
     def test_every_block_kind_draws(self):
         from pptx import Presentation

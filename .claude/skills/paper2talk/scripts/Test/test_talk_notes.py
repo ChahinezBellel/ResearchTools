@@ -100,6 +100,18 @@ class TestTiersAndBudget(unittest.TestCase):
         self.assertEqual(result["cadence"]["n_content"], 2)
         self.assertEqual(result["cadence"]["n_title_thanks"], 2)
 
+    def test_an_outline_slide_is_counted_as_a_divider(self):
+        tiers = tn.tiers_from_model(fx.model([
+            {"n": 1, "kind": "title", "title": "T", "blocks": [], "notes": ""},
+            {"n": 2, "kind": "outline", "title": "Outline", "blocks": [], "notes": ""},
+            {"n": 3, "kind": "divider", "title": "Method", "blocks": [], "notes": ""},
+            {"n": 4, "kind": "content", "title": "A", "blocks": [], "notes": ""},
+        ]))
+        self.assertEqual(tiers["divider"], {2, 3})
+        self.assertNotIn("outline", tiers)
+        # The tier sets come from talk_rules, not from a list typed here.
+        self.assertEqual(set(tiers), set(tn.rules.TIERS) - {"content"})
+
     def test_section_drift_beyond_tolerance_exits_one(self):
         budget = os.path.join(self.dir, "budget.json")
         with open(budget, "w", encoding="utf8") as fh:

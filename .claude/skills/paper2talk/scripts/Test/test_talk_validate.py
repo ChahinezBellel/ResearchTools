@@ -130,6 +130,61 @@ class TestWebTarget(unittest.TestCase):
                           "body{font-family:Calibri}</style>")
         self.assertEqual(tv.check_web(page), [])
 
+    # A relative reference works on the build machine and breaks once the deck is
+    # copied anywhere else, so it is the same failure as a CDN link, only quieter.
+
+    def test_a_relative_image_fails(self):
+        page = self._html("rel_img.html", '<img src="figures/fig1.png">')
+        problems = tv.check_web(page)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("figures/fig1.png", problems[0])
+
+    def test_a_relative_stylesheet_fails(self):
+        page = self._html("rel_css.html", '<link rel="stylesheet" href="deck.css">')
+        problems = tv.check_web(page)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("deck.css", problems[0])
+
+    def test_a_relative_css_url_fails_with_or_without_quotes(self):
+        for css in ("url(img/bg.png)", "url('img/bg.png')", 'url( "img/bg.png" )'):
+            with self.subTest(css=css):
+                page = self._html("rel_url.html", "<style>body{background:%s}</style>" % css)
+                problems = tv.check_web(page)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("img/bg.png", problems[0])
+
+    def test_a_protocol_relative_reference_fails(self):
+        # //host/x.js is fetched over the network just as https:// is.
+        page = self._html("proto.html", '<script src="//cdn.example/x.js"></script>')
+        self.assertTrue(tv.check_web(page))
+
+    def test_inline_fragment_and_mail_references_pass(self):
+        # Negative control: a check that flags these would refuse every real deck.
+        page = self._html(
+            "allowed.html",
+            '<img src="data:image/png;base64,iVBORw0KG">'
+            '<a href="#/3">next</a><a href="mailto:student@example.org">mail</a>'
+            "<svg><rect fill=\"url(#grad)\"/></svg>"
+            "<style>.b{background:url(data:image/png;base64,iVBORw0KG)}</style>",
+        )
+        self.assertEqual(tv.check_web(page), [])
+
+    def test_src_inside_a_script_string_is_not_an_attribute(self):
+        # The deck's own script may mention src= in a string or set a property; only
+        # an HTML attribute or a CSS url() loads anything when the page opens.
+        page = self._html(
+            "script.html",
+            '<script>const hint = "src=" + n; el.src = "#"; // the src= attribute</script>',
+        )
+        self.assertEqual(tv.check_web(page), [])
+
+    def test_an_external_reference_is_reported_once(self):
+        # Preserve the existing message, and do not report the same URL twice.
+        page = self._html("ext.html", '<img src="https://example.org/fig.png">')
+        problems = tv.check_web(page)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("external URL", problems[0])
+
 
 class TestOverlaps(unittest.TestCase):
     """A caption under a logo and a heading colliding with the row beneath it are
