@@ -70,10 +70,94 @@ reason. One section per plan file. Updated by the executing model only.
 
 ## plan2.md
 
-- [ ] Task 5 - template context: pacing, web constants, footer check
-- [ ] Task 6 - lab layouts per kind
-- [ ] Task 7 - interactions and accessibility
-- [ ] Task 8 - open only after a clean check
+- [x] Task 5 - template context: pacing, web constants, footer check (2026-10-08). 13 tests
+  in `test_talk_model.py`: `TestTemplateContext` (6) and `TestFooterFields` (7), fictitious
+  data. RED: 49 -> 62 tests, failures=3 errors=7 (missing `WEB_INTERACTION`,
+  `FOOTER_FIELD_MAX_CHARS`, `wpm`; `pacing` Undefined in the context; no footer report); one
+  probe bug fixed first (it wrote `.tex`, which switches Jinja delimiters). GREEN:
+  `talk_rules.WEB_INTERACTION = {"swipe_threshold_px": 40}` and `FOOTER_FIELD_MAX_CHARS = 48`
+  (operator, 2026-10-08); `talk_model.slide_pacing` (budget_rows seconds, aligned with the
+  model's own slide order); `render_template(..., wpm=)` adds `pacing` and `web`; CLI passes
+  `--wpm`; `_footer_problems` in `validate_model` checks the shown field (short form when
+  given) against the cap. Results: model 62 OK, validate 32 OK, notes 14 OK, 8 other suites
+  OK, 3 runnable pptx outline tests OK. The web template does not consume `pacing`/`web`
+  yet (Tasks 6-7).
+- [x] Task 6 - lab layouts per kind (2026-10-08). New `Test/test_web_skeleton.py`, 17 tests,
+  real template, generated images, fictitious metadata; imports jinja2 at the top so the
+  runner reports it NOT RUN without it. RED: 16 tests, failures=12 errors=1 (no `#006341`,
+  `supported-kinds` None, no `layout-<kind>`/`frametitle`/`footline`, no banner or logo,
+  `Cambria` present, no alert block, no outline list, no `1 / 1`); escaping, no-external-ref
+  and offline-check controls passed. `web_skeleton.html.j2` rewritten: header declares
+  `supported-kinds` (six) and `requires: lab-assets`; gabarit colour tokens, brand default
+  `#006341`, retired `5A7210` fallbacks gone; sans-serif only; per-kind layouts (title:
+  banner, rounded green box, subtitle, authors, institute, date, logo; outline: numbered
+  sections; divider: centred green title, no band; thanks: large green headline; backup and
+  content: title band); footer row of its own on every NON-title slide (spec.md) with `short_author` or authors
+  joined ", " (the Task 5 rule), `short_title` or title, date, `n / N`; figures `data_uri`
+  only. One later RED/GREEN pair after a visual check: the closing slide's block drawn as a
+  large green headline. Five accepted Task 2/3 web tests in `test_talk_model.py` given a
+  generated lab folder (the template now requires it); the two that would otherwise have
+  passed on the lab-folder refusal now assert their own message. Results: web 17 OK, model
+  62 OK, validate 32 OK, notes 14 OK, 8 other suites OK, 3 runnable pptx outline tests OK.
+  Informal visual check (headless Edge print, scratchpad only): 7 pages for 7 slides,
+  layouts close to compiled reference pages 1, 2, 3, 5, 12, 21.
+  Review correction (2026-10-08): the footer had also been rendered on the title slide.
+  Footer test now requires no footer on the title slide and exactly one on every other
+  slide (one-slide and footer-row tests adjusted to non-title slides). RED: 17 tests,
+  failures=1 (title slide held a footer). GREEN: footer rendered only when kind != "title";
+  web 17 OK, model 62 OK, validate 32 OK, notes 14 OK; probe: title 0 footers, the 6 others
+  1 each, 7 pages printed, `--web` clean.
+- [x] Task 7 - interactions and accessibility (2026-10-08). 13 tests in new class
+  `TestInteractions` (`test_web_skeleton.py`), structural markers on the rendered HTML. RED:
+  17 -> 30 tests, failures=10 errors=2 (no `DECK` config, guard, counter, progress,
+  `slideFromHash`, fullscreen, blackout, help dialog, click/touch handlers, `announce`,
+  `pacing`, print rules); reduced-motion already passed. GREEN: `web_skeleton.html.j2` adds
+  `DECK` (a `tojson` literal of `web.swipe_threshold_px` and `pacing`, inside the deck's one
+  script), typing/modifier guard, counter and progress bar on the viewport (outside the
+  stage), `#/n` read on load (clamped 1..N, anything else ignored) and written with
+  `replaceState`, `hashchange`, F fullscreen, B/. blackout, `?` help dialog (role dialog,
+  aria-modal, Escape closes, focus restored), click advance with an interactive-element and
+  text-selection guard, single-touch swipe at the threshold measured at stage scale with a
+  multi-touch guard, `aria-live` announcement and `aria-hidden` on inactive slides, pacing in
+  the notes panel (elapsed against cumulative `pacing`, clock from the first move), print
+  hides the chrome. A browser check found the print path at 8 pages for 7 slides (the
+  `#announce` region printed); a new RED/GREEN pair added it to the print-hidden chrome, back
+  to 7 pages. Results: web 30 OK, model 62 OK, validate 32 OK, notes 14 OK, 8 other suites
+  OK, 3 runnable pptx outline tests OK; probe `--web` clean, title 0 footers, others 1.
+  Browser smoke (installed Edge, headless `--dump-dom`): no hash -> 1, `#/4` -> 4 (`4 / 7`,
+  bar 50%), `#/99` -> 7, `#/0` -> 1, `#/abc` and `#/-2` ignored -> 1; announce text updates.
+  Keyboard, click and touch not exercised in the browser (no automation tool). Found,
+  pre-existing at e2f24ef and not fixed: in a window smaller than the stage the scaled
+  stage is offset and cropped (grid centring of an oversized item), unchanged since then.
+  Post-review responsive fix (2026-10-08): root cause, `#viewport` centred `#stage` with
+  CSS grid; a grid item larger than its track starts at the container's corner, so after
+  `scale()` about its centre the stage landed at 960*(1-s), 540*(1-s) (measured in Edge:
+  left 403 at 1280x720, right edge 1517 past a 1254 px viewport; cropped at all four sizes
+  tested). New class `TestStageFit` (4 tests). RED: 34 tests, failures=3 (stage not
+  absolutely centred, `fit()` without the -50% translate, print not resetting position).
+  GREEN: `#stage` absolute at left/top 50%, `fit()` applies `translate(-50%, -50%)
+  scale(min(vw/1920, vh/1080))`, print sets `position: static`; canvas still 1920x1080.
+  Edge measurements at `#/4` (stage inside the viewport and centred within 1 px, ratio
+  1.778, slide 4, `4 / 7`, bar 50%): 1920x1080 window (viewport 1894x987) 70,0 1755x987;
+  1280x720 (1254x627) 70,0 1115x627; 1366x768 (1340x675) 70,0 1200x675; 1024x768
+  (998x675) 0,57 998x561. Print 7 pages; probe `--web` clean, title 0 footers + logo,
+  others 1 footer. Web 34 OK, model 62 OK, validate 32 OK, notes 14 OK.
+- [x] Task 8 - open only after a clean check (2026-10-08). 7 tests in `test_talk_validate.py`:
+  new class `TestOpenAfterCheck` (6, `webbrowser.open` patched in every case) and one
+  `--web`-without-`--open` control in `TestMainDispatch`. RED pass 1: 32 -> 39 tests,
+  errors=6 (`talk_validate` had no `webbrowser`); RED pass 2 after adding only the import:
+  errors=6, `SystemExit: 2` (argparse did not know `--open`); both no-open controls passed.
+  GREEN: `--open` flag; after a clean `--web` check `open_in_browser()` hands
+  `pathlib.Path(...).as_uri()` to the standard-library `webbrowser.open` once; findings exit
+  1 and never open; an unreadable deck exits 2 and never opens; `--open` without `--web` is
+  a usage refusal (exit 2); a browser that does not start (`False` or `webbrowser.Error`)
+  is reported on stderr with the file to open by hand and leaves exit 0. Suppression is the
+  absence of `--open` (the `/talk --no-open` opt-out is documentation, Plan 3). No browser
+  is named. Results: validate 39 OK, web 34 OK, model 62 OK, notes 14 OK, 8 other suites OK.
+  Integration (real CLI, probe, opener replaced by a recorder, no browser launched): clean
+  + `--open` exit 0 opened once (`file:///...deck.html`); deck with one relative `src` +
+  `--open` exit 1 opened 0; clean without `--open` opened 0; probe has no http, script src
+  or @import.
 
 ## plan3.md
 

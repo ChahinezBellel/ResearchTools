@@ -1,154 +1,29 @@
 {# supported-blocks: bullets figure takeaway cards chips stats table matrix zoneband chart equation #}
-<!doctype html>
-<html lang="{{ meta.notes_lang | default('en') }}">
-<head>
-<meta charset="utf-8">
-<title>{{ meta.title }}</title>
-<!--
-  Web render of talk_model.json. Rendered by:
-    python talk_model.py <model.json> --render web_skeleton.html.j2 --out out/deck.html
-
-  ONE self-contained file is the whole point of this target: inline CSS and JS,
-  images as data: URIs, no CDN, no build step. A conference laptop has no network,
-  and talk_validate.py --web fails the file on any external http(s) reference in
-  src, href or url(). That is also why the fonts below are the safe-list faces
-  rather than a webfont: the reference skill this target borrows from loads faces
-  from a CDN while promising self-containment, and that promise is the one that
-  matters in the room.
-
-  Print: the @media print block lays each slide out as its own page, so printing to
-  PDF through headless Chromium gives one page per slide with selectable vector
-  text. Never screenshot the slides and stitch them - that rasterises the text.
-  Hand the printed PDF to to_a4.py when paper output was asked for.
--->
-<style>
-  :root {
-    /* The stage is fixed and scaled as a whole; changing these two values is the
-       only thing an aspect-ratio change touches. */
-    --slide-w: {{ 1080 if meta.aspect == "9:16" else 1920 }}px;
-    --slide-h: {{ 1920 if meta.aspect == "9:16" else (1080 if meta.aspect == "16:9" else 1440) }}px;
-    --brand: #{{ palette.brand | default('5A7210') }};
-    --ink: #{{ palette.ink | default('23262A') }};
-    --muted: #6B6F63;
-    --card: #F1F2EC;
-    --card-dk: #E4E7DA;
-    --s1: #{{ palette.s1 | default('2E7D32') }};
-    --s2: #{{ palette.s2 | default('C57A00') }};
-    --s3: #{{ palette.s3 | default('B3221F') }};
-    /* Body floor from the audience answer, in px at stage scale. */
-    --body: {{ 34 if meta.audience == "public" else 28 }}px;
-    --caption: {{ 30 if meta.audience == "public" else 24 }}px;
-  }
-  html, body { margin: 0; padding: 0; background: #111; color: var(--ink);
-               font-family: Calibri, Carlito, "Segoe UI", sans-serif; overflow: hidden; }
-  #viewport { position: fixed; inset: 0; display: grid; place-items: center; }
-  #stage { width: var(--slide-w); height: var(--slide-h); position: relative;
-           transform-origin: center center; background: #fff; }
-
-  /* Slide switching. Never display:none / display:block here: a later
-     .slide-content { display: flex } overrides the none and every slide becomes
-     visible at once. Visibility, opacity and pointer-events do the job and keep
-     the layout stable. */
-  .slide { position: absolute; inset: 0; visibility: hidden; opacity: 0;
-           pointer-events: none; transition: opacity .18s ease; padding: 90px 110px;
-           box-sizing: border-box; display: flex; flex-direction: column; gap: 28px; }
-  .slide.active { visibility: visible; opacity: 1; pointer-events: auto; }
-
-  .eyebrow { font-size: var(--caption); letter-spacing: 2px; font-weight: 700;
-             text-transform: uppercase; color: var(--brand); }
-  h1 { font-family: Cambria, Caladea, Georgia, serif; font-size: 60px; margin: 0;
-       color: var(--ink); }
-  h2 { font-family: Cambria, Caladea, Georgia, serif; font-size: 46px; margin: 0; }
-  ul { font-size: var(--body); line-height: 1.35; margin: 0; padding-left: 1.2em; }
-  figure { margin: 0; }
-  figure img { max-width: 100%; max-height: 620px; object-fit: contain; }
-  figcaption { font-size: var(--caption); font-style: italic; color: var(--muted); }
-  .takeaway { background: var(--card-dk); border-radius: 12px; padding: 22px 26px;
-              font-family: Cambria, Caladea, Georgia, serif; font-size: calc(var(--body) + 4px);
-              font-weight: 700; color: var(--brand); }
-  .cards { display: flex; gap: 20px; }
-  .card { background: var(--card); border-radius: 12px; padding: 20px;
-          box-shadow: 0 2px 8px rgba(0,0,0,.14); flex: 1; font-size: var(--body); }
-  .card h3 { margin: 0 0 8px; font-size: var(--body); color: var(--brand); }
-  .chips { display: flex; gap: 34px; align-items: center; font-size: var(--body); }
-  .chip .disc { width: 46px; height: 46px; border-radius: 50%; display: inline-grid;
-                place-items: center; color: #fff; font-weight: 700; margin-right: 12px; }
-  .stats { display: flex; gap: 30px; text-align: center; }
-  .stats .value { font-family: Cambria, Caladea, Georgia, serif; font-size: 64px;
-                  font-weight: 700; color: var(--brand); }
-  table { border-collapse: collapse; font-size: var(--body); width: 100%; }
-  th, td { border: 1px solid #C9CDBE; padding: 10px 12px; text-align: left; }
-  thead th { background: var(--card-dk); font-weight: 700; }
-  tbody td:first-child { font-weight: 700; }
-  .matrix { display: grid; gap: 2px; }
-  .matrix .cell { display: grid; place-items: center; width: 96px; height: 96px;
-                  font-size: var(--caption); }
-  .band { display: flex; height: 64px; border-radius: 6px; overflow: hidden;
-          font-size: var(--caption); }
-  .band > div { display: grid; place-items: center; color: #fff; font-weight: 700; }
-  .equation { font-family: Cambria, Caladea, Georgia, serif;
-              font-size: calc(var(--body) + 6px); text-align: center; }
-  .cite { font-size: var(--caption); color: var(--muted); }
-
-  /* A negated CSS function is silently ignored: -clamp(...) does nothing. Write
-     the negation as calc(-1 * clamp(...)) when a negative offset is needed. */
-  .notes { position: fixed; right: 0; top: 0; width: 32vw; height: 100vh;
-           background: #fff; color: #222; padding: 24px; overflow: auto;
-           font-size: 16px; line-height: 1.45; display: none; }
-  body.presenting .notes { display: block; }
-  body.presenting #viewport { right: 32vw; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .slide { transition: none; }
-  }
-
-  /* One page per slide, vector text, no extra tooling. */
-  @media print {
-    @page { size: {{ '1080px 1920px' if meta.aspect == "9:16" else ('1920px 1080px' if meta.aspect == "16:9" else '1920px 1440px') }}; margin: 0; }
-    html, body { background: #fff; overflow: visible; }
-    #viewport { position: static; display: block; }
-    #stage { transform: none !important; width: auto; height: auto; }
-    .slide { position: relative; visibility: visible; opacity: 1; page-break-after: always;
-             width: var(--slide-w); height: var(--slide-h); }
-    .notes { display: none !important; }
-  }
-</style>
-</head>
-<body>
-<div id="viewport">
-  <div id="stage">
-{% for s in slides %}
-    <section class="slide" data-n="{{ s.n }}" data-kind="{{ s.kind | default('content') }}">
-{% if s.kind == "title" %}
-      <h1>{{ s.title }}</h1>
-      <div class="cite">{{ meta.authors | join(' &middot; ') }}</div>
-      <div class="cite">{{ meta.venue | default('') }}</div>
-{% elif s.kind == "divider" %}
-      <h1 style="margin:auto; text-align:center; color:var(--brand)">{{ s.title }}</h1>
-{% else %}
-{% if s.section %}      <div class="eyebrow">{{ s.section }}</div>
-{% endif %}      <h2>{{ s.title }}</h2>
-{% for b in s.blocks %}
+{# supported-kinds: title outline content divider thanks backup #}
+{# requires: lab-assets #}
+{#- One rule for the footer author: exactly the field talk_model._footer_problems measures. -#}
+{%- set foot_author = meta.short_author or (meta.authors or []) | join(', ') -%}
+{%- set foot_title = meta.short_title or meta.title -%}
+{%- macro blocks(items) -%}
+{% for b in items %}
 {% if b.kind == "bullets" %}
       <ul>
 {% for item in b['items'] %}        <li>{{ item }}</li>
 {% endfor %}      </ul>
 {% elif b.kind == "figure" %}
       <figure>
-        <!-- data: URI, so the deck stays one file. talk_validate.py --web fails
-             the deck on an http(s) src. -->
-        <img src="{{ b.data_uri | default(b.asset) }}" alt="{{ b.caption | default('figure') }}">
+        <img src="{{ b.data_uri }}" alt="{{ b.caption | default('figure') }}">
 {% if b.caption %}        <figcaption>{{ b.caption }}{% if b.cite %} <span class="cite">{{ b.cite }}</span>{% endif %}</figcaption>
 {% endif %}      </figure>
 {% elif b.kind == "takeaway" %}
-      <div class="takeaway">{{ b.text }}{% if b.support %}<div style="font-family:Calibri,sans-serif;font-weight:400;color:var(--ink);font-size:var(--body);margin-top:8px">{{ b.support }}</div>{% endif %}</div>
+      <div class="block{% if b.alert %} alert{% endif %}">{% if b.title %}<div class="block-title">{{ b.title }}</div>{% endif %}<div class="block-body"><strong>{{ b.text }}</strong>{% if b.support %}<div>{{ b.support }}</div>{% endif %}</div></div>
 {% elif b.kind == "cards" %}
       <div class="cards">
-{% for c in b['items'] %}        <div class="card"><h3>{{ c.title | default('') }}</h3>{{ c.text | default('') }}</div>
+{% for c in b['items'] %}        <div class="block{% if c.alert %} alert{% endif %}"><div class="block-title">{{ c.title | default('') }}</div><div class="block-body">{{ c.text | default('') }}</div></div>
 {% endfor %}      </div>
 {% elif b.kind == "chips" %}
       <div class="chips">
-{% for c in b['items'] %}        <div class="chip"><span class="disc" style="background:#{{ c.color | default('5A7210') }}">{{ c.glyph | default('') }}</span>{{ c.label }}{% if c.sub %} <span class="cite">{{ c.sub }}</span>{% endif %}</div>
+{% for c in b['items'] %}        <div class="chip"><span class="disc" style="background:{% if c.color %}#{{ c.color }}{% else %}var(--brand){% endif %}">{{ c.glyph | default('') }}</span>{{ c.label }}{% if c.sub %} <span class="cite">{{ c.sub }}</span>{% endif %}</div>
 {% endfor %}      </div>
 {% elif b.kind == "stats" %}
       <div class="stats">
@@ -167,7 +42,7 @@
 {% endfor %}{% endfor %}      </div>
 {% elif b.kind == "zoneband" %}
       <div class="band">
-{% for z in b.zones %}        <div style="flex: {{ z.fraction }}; background:#{{ z.color | default('5A7210') }}">{{ z.label }}</div>
+{% for z in b.zones %}        <div style="flex: {{ z.fraction }}; background:{% if z.color %}#{{ z.color }}{% else %}var(--brand){% endif %}">{{ z.label }}</div>
 {% endfor %}      </div>
 {% elif b.kind == "chart" %}
       <!-- Inline SVG: no chart library, no CDN, and the curve stays vector in the
@@ -186,22 +61,300 @@
 {% endif %}
 {% endif %}
 {% endfor %}
+{%- endmacro %}
+<!doctype html>
+<html lang="{{ meta.notes_lang | default('en') }}">
+<head>
+<meta charset="utf-8">
+<title>{{ meta.title }}</title>
+<!--
+  Web render of talk_model.json in the LARI identity. Rendered by:
+    python talk_model.py <model.json> --render web_skeleton.html.j2 --lab-dir <gabarit slides> --out out/deck.html
+
+  The visual source of truth is the canonical lab Beamer gabarit
+  (gabarit_these_maitrise_DSA_UQAC/src/slides/main.tex) AS IT RENDERS when compiled: a
+  green frame-title band, a rounded green title box with the UQAC banner above it and the
+  LARI logo beside it on the title slide only, green blocks with red alert blocks, and one
+  green footer row. Its defects are not reproduced: the footer is a row of its own, so no
+  content runs under it; its fields are the short forms talk_model.validate_model keeps
+  within the footer box, so nothing is clipped; and there are no navigation icons.
+
+  ONE self-contained file: inline CSS and JS, every image a data: URI (talk_model embeds the
+  figures and the two lab images), safe-list system fonts and no webfont, no CDN, no build
+  step. talk_validate.py --web fails the file on any external or relative reference.
+
+  Print: the @media print block lays each slide out as its own page, so printing to PDF
+  through headless Chromium gives one page per slide with selectable vector text. Never
+  screenshot the slides and stitch them - that rasterises the text. Hand the printed PDF to
+  to_a4.py when paper output was asked for.
+-->
+<style>
+  :root {
+    /* The stage is fixed and scaled as a whole; changing these two values is the
+       only thing an aspect-ratio change touches. */
+    --slide-w: {{ 1080 if meta.aspect == "9:16" else 1920 }}px;
+    --slide-h: {{ 1920 if meta.aspect == "9:16" else (1080 if meta.aspect == "16:9" else 1440) }}px;
+    /* Colours of the canonical gabarit (main.tex): uqacgreen / primary RGB(0,99,65),
+       secondary RGB(255,102,0), accent1 RGB(0,153,76), accent2 RGB(204,0,102),
+       accent3 RGB(153,0,204), and its four risk shades. palette.brand overrides the green. */
+    --brand: #{{ palette.brand | default('006341') }};
+    --secondary: #FF6600;
+    --accent1: #00994C;
+    --accent2: #CC0066;
+    --accent3: #9900CC;
+    --risk-low: #90EE90;
+    --risk-med: #FFFF96;
+    --risk-high: #FFC864;
+    --risk-crit: #FF7878;
+    /* The alert-block red is Beamer's default alerted colour as it renders in the
+       compiled reference (page 3); the gabarit does not state a value for it. */
+    --alert: #C00000;
+    --ink: #{{ palette.ink | default('23262A') }};
+    --muted: #5F635B;
+    --block-body: color-mix(in srgb, var(--brand) 10%, #fff);
+    --alert-body: color-mix(in srgb, var(--alert) 10%, #fff);
+    --s1: #{{ palette.s1 | default('2E7D32') }};
+    --s2: #{{ palette.s2 | default('C57A00') }};
+    --s3: #{{ palette.s3 | default('B3221F') }};
+    /* Sans-serif throughout, as the reference renders; local faces only. */
+    --sans: "Latin Modern Sans", "Segoe UI", Calibri, Carlito, Arial, sans-serif;
+    /* Body floor from the audience answer, in px at stage scale. */
+    --body: {{ 34 if meta.audience == "public" else 28 }}px;
+    --caption: {{ 30 if meta.audience == "public" else 24 }}px;
+  }
+  html, body { margin: 0; padding: 0; background: #111; color: var(--ink);
+               font-family: var(--sans); overflow: hidden; }
+  /* The stage centres itself: its centre is pinned to the viewport's centre and fit()
+     scales it about that point. Grid centring is not used, because a grid item larger
+     than its container starts at the container's corner, and the scaled stage then
+     lands off-centre and cropped on any viewport smaller than the canvas. */
+  #viewport { position: fixed; inset: 0; overflow: hidden; }
+  #stage { width: var(--slide-w); height: var(--slide-h); position: absolute;
+           left: 50%; top: 50%; transform: translate(-50%, -50%);
+           transform-origin: center center; background: #fff; }
+
+  /* Slide switching. Never display:none / display:block here: a later display rule on
+     the slide overrides the none and every slide becomes visible at once. Visibility,
+     opacity and pointer-events do the job and keep the layout stable. */
+  .slide { position: absolute; inset: 0; visibility: hidden; opacity: 0;
+           pointer-events: none; transition: opacity .18s ease; box-sizing: border-box;
+           display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+           grid-template-areas: "head" "body" "foot"; }
+  .slide.active { visibility: visible; opacity: 1; pointer-events: auto; }
+
+  /* Frame-title band: full width, flush to the top, white title on the lab green. */
+  .frametitle { grid-area: head; background: var(--brand); color: #fff;
+                min-height: 116px; padding: 0 60px; display: flex; align-items: center; }
+  .frametitle h2 { margin: 0; font-size: 54px; font-weight: 400; }
+
+  /* The content row ends where the footer row starts: nothing can sit under it. */
+  .slide-body { grid-area: body; min-height: 0; overflow: hidden; box-sizing: border-box;
+                padding: 40px 60px; display: flex; flex-direction: column; gap: 28px; }
+
+  /* Footer: one green row, its own grid area. Fields are short forms kept within the
+     box by validate_model; nowrap keeps one line. */
+  .footline { grid-area: foot; display: grid;
+              grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) auto auto;
+              background: var(--brand); color: #fff; font-size: var(--caption); }
+  .footline span { padding: 8px 20px; white-space: nowrap; overflow: hidden; }
+  .footline .foot-title { text-align: center; }
+
+  /* Title slide. */
+  .layout-title .slide-body { position: relative; padding: 0 0 24px; gap: 22px;
+                              text-align: center; }
+  .layout-title .banner { display: block; width: 100%; height: auto; }
+  .title-box { margin: 18px 40px 0; background: var(--brand); color: #fff;
+               border-radius: 18px; padding: 34px 40px;
+               box-shadow: 0 8px 18px rgba(0, 0, 0, .28); }
+  .title-box h1 { margin: 0; font-size: 60px; font-weight: 400; }
+  .title-box .subtitle { margin: 12px 0 0; font-size: 38px; }
+  .layout-title .authors { margin: 18px 0 0; font-size: 40px; }
+  .layout-title .institute { margin: 0; font-size: 30px; }
+  .layout-title .date { margin: 0; font-size: 34px; }
+  .layout-title .logo { position: absolute; right: 24px; bottom: 12px; height: 280px; }
+
+  /* Outline: the model's sections, numbered on green discs. */
+  .outline { list-style: none; counter-reset: sec; margin: 0; padding: 0;
+             font-size: 40px; color: var(--brand); }
+  .outline li { counter-increment: sec; display: flex; align-items: center; gap: 24px;
+                margin: 14px 0; }
+  .outline li::before { content: counter(sec); flex: none; width: 46px; height: 46px;
+                        border-radius: 50%; background: var(--brand); color: #fff;
+                        display: grid; place-items: center; font-size: 26px; }
+
+  /* Divider: no band; the section name, large and centred. */
+  .layout-divider .slide-body { justify-content: center; align-items: center; }
+  .divider-title { margin: 0; font-size: 84px; font-weight: 700; color: var(--brand); }
+
+  /* Closing slide: the body centred and enlarged; its text is a large green headline,
+     as on the reference's closing page, not a boxed block. */
+  .layout-thanks .slide-body { justify-content: center; align-items: center;
+                               text-align: center; font-size: 44px; }
+  .layout-thanks .block { box-shadow: none; font-size: 96px; }
+  .layout-thanks .block-body { background: none; color: var(--brand); }
+
+  ul { font-size: var(--body); line-height: 1.35; margin: 0; padding-left: 1.2em; }
+  ul li::marker { color: var(--brand); }
+  figure { margin: 0; }
+  figure img { max-width: 100%; max-height: 620px; object-fit: contain; }
+  figcaption { font-size: var(--caption); color: var(--muted); }
+  .block { border-radius: 12px; overflow: hidden; box-shadow: 0 4px 10px rgba(0, 0, 0, .2);
+           font-size: var(--body); }
+  .block-title { background: var(--brand); color: #fff; padding: 8px 20px; }
+  .block-body { background: var(--block-body); padding: 14px 20px; }
+  .block.alert .block-title { background: var(--alert); }
+  .block.alert .block-body { background: var(--alert-body); }
+  .cards { display: flex; gap: 24px; }
+  .cards .block { flex: 1; }
+  .chips { display: flex; gap: 34px; align-items: center; font-size: var(--body); }
+  .chip .disc { width: 46px; height: 46px; border-radius: 50%; display: inline-grid;
+                place-items: center; color: #fff; font-weight: 700; margin-right: 12px; }
+  .stats { display: flex; gap: 30px; text-align: center; }
+  .stats .value { font-size: 64px; font-weight: 700; color: var(--brand); }
+  table { border-collapse: collapse; font-size: var(--body); width: 100%; }
+  th, td { border: 1px solid #9DB3A8; padding: 10px 12px; text-align: left; }
+  thead th { background: var(--block-body); font-weight: 700; }
+  tbody td:first-child { font-weight: 700; }
+  .matrix { display: grid; gap: 2px; }
+  .matrix .cell { display: grid; place-items: center; width: 96px; height: 96px;
+                  font-size: var(--caption); }
+  .band { display: flex; height: 64px; border-radius: 6px; overflow: hidden;
+          font-size: var(--caption); }
+  .band > div { display: grid; place-items: center; color: #fff; font-weight: 700; }
+  .equation { font-size: calc(var(--body) + 6px); text-align: center; }
+  .cite { font-size: var(--caption); color: var(--muted); }
+
+  /* A negated CSS function is silently ignored: -clamp(...) does nothing. Write
+     the negation as calc(-1 * clamp(...)) when a negative offset is needed. */
+  .notes { position: fixed; right: 0; top: 0; width: 32vw; height: 100vh;
+           background: #fff; color: #222; padding: 24px; overflow: auto;
+           font-size: 16px; line-height: 1.45; display: none; }
+  body.presenting .notes { display: block; }
+  body.presenting #viewport { right: 32vw; }
+
+  .pacing { font-weight: 700; color: var(--brand); margin-bottom: 12px; }
+
+  /* Interaction chrome. It sits on the viewport, outside the stage, so it never covers
+     the slide's own footer; the counter matters most on the title slide, which has none. */
+  #counter { position: fixed; top: 8px; right: 12px; z-index: 10; padding: 2px 8px;
+             border-radius: 4px; background: rgba(0, 0, 0, .45); color: #eee;
+             font-size: 14px; }
+  #progress { position: fixed; top: 0; left: 0; right: 0; height: 4px; z-index: 10;
+              background: rgba(255, 255, 255, .15); }
+  #progress-bar { height: 100%; width: 0; background: var(--brand); transition: width .18s ease; }
+  #blackout { position: fixed; inset: 0; z-index: 20; background: #000; }
+  #help { position: fixed; inset: 0; z-index: 30; margin: auto; width: min(560px, 90vw);
+          height: fit-content; box-sizing: border-box; padding: 24px 28px; border-radius: 10px;
+          background: #fff; color: var(--ink); font-size: 16px; line-height: 1.5;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+  #help h2 { margin: 0 0 12px; color: var(--brand); font-size: 22px; }
+  #help dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; margin: 0 0 16px; }
+  #help dt { font-weight: 700; }
+  #help dd { margin: 0; }
+  #blackout[hidden], #help[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
+             clip: rect(0 0 0 0); white-space: nowrap; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .slide { transition: none; }
+    #progress-bar { transition: none; }
+  }
+
+  /* One page per slide, vector text, no extra tooling. The footer prints with its
+     slide; the interaction chrome does not print. */
+  @media print {
+    @page { size: {{ '1080px 1920px' if meta.aspect == "9:16" else ('1920px 1080px' if meta.aspect == "16:9" else '1920px 1440px') }}; margin: 0; }
+    html, body { background: #fff; overflow: visible; }
+    #viewport { position: static; display: block; }
+    #stage { transform: none !important; position: static; width: auto; height: auto; }
+    .slide { position: relative; visibility: visible; opacity: 1; page-break-after: always;
+             width: var(--slide-w); height: var(--slide-h); }
+    #counter, #progress, #help, #blackout, #announce, .notes { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<div id="viewport">
+  <div id="stage">
+{% for s in slides %}
+{% set kind = s.kind | default('content') %}
+    <section class="slide layout-{{ kind }}" data-n="{{ s.n }}" data-kind="{{ kind }}">
+{% if kind == "title" %}
+      <div class="slide-body">
+        <img class="banner" src="{{ lab.banner }}" alt="UQAC">
+        <div class="title-box">
+          <h1>{{ s.title or meta.title }}</h1>
+{% if meta.subtitle %}          <p class="subtitle">{{ meta.subtitle }}</p>
+{% endif %}        </div>
+        <p class="authors">{{ (meta.authors or []) | join(', ') }}</p>
+{% if meta.institute %}        <p class="institute">{{ meta.institute }}</p>
+{% endif %}{% if meta.date %}        <p class="date">{{ meta.date }}</p>
+{% endif %}        <img class="logo" src="{{ lab.logo }}" alt="LAR.i">
+      </div>
+{% elif kind == "divider" %}
+      <div class="slide-body">
+        <h1 class="divider-title">{{ s.title }}</h1>
+      </div>
+{% else %}
+      <header class="frametitle"><h2>{{ s.title }}</h2></header>
+      <div class="slide-body">
+{% if kind == "outline" and sections %}
+      <ol class="outline">
+{% for name in sections %}        <li>{{ name }}</li>
+{% endfor %}      </ol>
+{% endif %}
+{{ blocks(s.blocks or []) }}
+      </div>
+{% endif %}
+{% if kind != "title" %}
+      <footer class="footline"><span class="foot-author">{{ foot_author }}</span><span class="foot-title">{{ foot_title }}</span><span class="foot-date">{{ meta.date | default('') }}</span><span class="foot-num">{{ loop.index }} / {{ loop.length }}</span></footer>
 {% endif %}
     </section>
 {% endfor %}
   </div>
 </div>
 
-<aside class="notes" id="notes"></aside>
+<div id="counter" aria-hidden="true">1 / {{ slides | length }}</div>
+<div id="progress" aria-hidden="true"><div id="progress-bar"></div></div>
+<div id="blackout" hidden aria-hidden="true"></div>
+<div id="help" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1" hidden>
+  <h2 id="help-title">Keyboard shortcuts</h2>
+  <dl>
+    <dt>&rarr; Space PageDown</dt><dd>next slide (or click, or swipe left)</dd>
+    <dt>&larr; PageUp</dt><dd>previous slide (or swipe right)</dd>
+    <dt>Home End</dt><dd>first and last slide</dd>
+    <dt>N</dt><dd>speaker notes and pacing</dd>
+    <dt>F</dt><dd>fullscreen</dd>
+    <dt>B or .</dt><dd>black screen</dd>
+    <dt>?</dt><dd>this help; Escape closes it</dd>
+  </dl>
+  <button type="button" id="help-close">Close</button>
+</div>
+<div id="announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+<aside class="notes" id="notes"><div id="pacing" class="pacing"></div><div id="notes-text"></div></aside>
 
 <script>
+// The deck's interaction layer, plain JavaScript written for this template. Every number
+// it acts on arrives in DECK: the swipe threshold from talk_rules.WEB_INTERACTION and the
+// spoken seconds of each slide from the notes budget (talk_model.slide_pacing).
+const DECK = {{ {"swipe_threshold_px": web.swipe_threshold_px, "pacing": pacing} | tojson }};
 // Speaker notes travel with the deck, exactly as they do in the PowerPoint notes
 // pane and in Beamer's \note{}. Press N for the presenter view.
 const NOTES = {{ slides | map(attribute='notes') | list | tojson }};
 const slides = Array.from(document.querySelectorAll('.slide'));
 const stage = document.getElementById('stage');
-const notesEl = document.getElementById('notes');
+const notesText = document.getElementById('notes-text');
+const pacingEl = document.getElementById('pacing');
+const counter = document.getElementById('counter');
+const progressBar = document.getElementById('progress-bar');
+const announce = document.getElementById('announce');
+const blackout = document.getElementById('blackout');
+const help = document.getElementById('help');
 let index = 0;
+let scale = 1;
+let started = null;      // the talk clock starts at the first move away from a slide
+let lastFocus = null;
 
 function fit() {
   // One transform on the whole stage. Nothing inside a slide ever re-lays out, so
@@ -209,26 +362,142 @@ function fit() {
   const vw = window.innerWidth * (document.body.classList.contains('presenting') ? 0.68 : 1);
   const vh = window.innerHeight;
   const sw = stage.offsetWidth, sh = stage.offsetHeight;
-  stage.style.transform = 'scale(' + Math.min(vw / sw, vh / sh) + ')';
+  scale = Math.min(vw / sw, vh / sh);
+  stage.style.transform = 'translate(-50%, -50%) scale(' + scale + ')';
+}
+
+function slideFromHash(hash) {
+  // Only "#/<digits>" addresses a slide; anything else is ignored. A number past either
+  // end is clamped to the deck rather than refused: #/0 is slide 1, #/99 the last.
+  const m = /^#\/(\d+)$/.exec(hash || '');
+  if (!m) return null;
+  return Math.min(slides.length, Math.max(1, parseInt(m[1], 10))) - 1;
+}
+
+function clock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function updatePacing() {
+  // Elapsed talk time against the cumulative spoken budget up to the end of this slide.
+  const planned = DECK.pacing.slice(0, index + 1).reduce((a, b) => a + b, 0);
+  const elapsed = started === null ? 0 : (Date.now() - started) / 1000;
+  const lead = planned - elapsed;
+  pacingEl.textContent = 'this slide ' + clock(DECK.pacing[index] || 0)
+    + ' | elapsed ' + clock(elapsed) + ' of ' + clock(planned)
+    + (started === null ? ' | clock starts at the first move'
+                        : (lead >= 0 ? ' | ahead ' : ' | behind ') + clock(Math.abs(lead)));
 }
 
 function show(i) {
   index = Math.max(0, Math.min(slides.length - 1, i));
-  slides.forEach((s, k) => s.classList.toggle('active', k === index));
-  notesEl.textContent = NOTES[index] || '';
+  slides.forEach((s, k) => {
+    s.classList.toggle('active', k === index);
+    s.setAttribute('aria-hidden', k === index ? 'false' : 'true');
+  });
+  notesText.textContent = NOTES[index] || '';
+  counter.textContent = (index + 1) + ' / ' + slides.length;
+  progressBar.style.width = (slides.length > 1 ? index / (slides.length - 1) * 100 : 100) + '%';
+  const heading = slides[index].querySelector('h1, h2');
+  announce.textContent = 'Slide ' + (index + 1) + ' of ' + slides.length
+    + (heading ? ': ' + heading.textContent : '');
+  if (location.hash !== '#/' + (index + 1)) history.replaceState(null, '', '#/' + (index + 1));
+  updatePacing();
+}
+
+function go(i) {
+  if (started === null && i !== index) started = Date.now();
+  show(i);
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+}
+
+function openHelp() {
+  lastFocus = document.activeElement;
+  help.hidden = false;
+  help.focus();
+}
+
+function closeHelp() {
+  help.hidden = true;
+  if (lastFocus && lastFocus.focus) lastFocus.focus();
+}
+
+function isTyping(target) {
+  // A shortcut must never steal a key from a field the presenter is typing into.
+  const el = target || document.activeElement;
+  return !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName));
 }
 
 window.addEventListener('resize', fit);
+window.addEventListener('hashchange', () => {
+  const i = slideFromHash(location.hash);
+  if (i !== null && i !== index) go(i);
+});
+document.getElementById('help-close').addEventListener('click', closeHelp);
+
 document.addEventListener('keydown', (e) => {
-  if (['ArrowRight', 'PageDown', ' '].includes(e.key)) show(index + 1);
-  else if (['ArrowLeft', 'PageUp'].includes(e.key)) show(index - 1);
-  else if (e.key === 'Home') show(0);
-  else if (e.key === 'End') show(slides.length - 1);
-  else if (e.key.toLowerCase() === 'n') { document.body.classList.toggle('presenting'); fit(); }
+  if (e.ctrlKey || e.altKey || e.metaKey || isTyping(e.target)) return;
+  if (!help.hidden) {
+    if (e.key === 'Escape' || e.key === '?') { closeHelp(); e.preventDefault(); }
+    return;
+  }
+  if (e.key === 'Escape' && !blackout.hidden) { blackout.hidden = true; return; }
+  if (['ArrowRight', 'PageDown', ' '].includes(e.key)) go(index + 1);
+  else if (['ArrowLeft', 'PageUp'].includes(e.key)) go(index - 1);
+  else if (e.key === 'Home') go(0);
+  else if (e.key === 'End') go(slides.length - 1);
+  else if (e.key === '?') openHelp();
+  else {
+    switch (e.key.toLowerCase()) {
+      case 'n': document.body.classList.toggle('presenting'); fit(); break;
+      case 'f': toggleFullscreen(); break;
+      case 'b':
+      case '.': blackout.hidden = !blackout.hidden; break;
+      default: return;
+    }
+  }
+  e.preventDefault();
 });
 
-show(0);
+document.addEventListener('click', (e) => {
+  // A click turns the page, except on something that is itself clickable or on the
+  // presenter's own panels, and except when the presenter was selecting text.
+  if (e.button !== 0) return;
+  if (e.target.closest('a, button, input, select, textarea, [contenteditable], #help, .notes')) return;
+  if (!blackout.hidden) { blackout.hidden = true; return; }
+  if (String(window.getSelection()).length) return;
+  go(index + 1);
+});
+
+let touch = null;
+document.addEventListener('touchstart', (e) => {
+  // A second finger makes the whole gesture a pinch or a zoom, never a page turn.
+  touch = e.touches.length > 1 ? { multi: true }
+                               : { x: e.touches[0].clientX, y: e.touches[0].clientY, multi: false };
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (touch && e.touches.length > 1) touch.multi = true;
+}, { passive: true });
+document.addEventListener('touchend', (e) => {
+  if (!touch || touch.multi) { touch = null; return; }
+  const t = e.changedTouches[0];
+  const dx = (t.clientX - touch.x) / scale;   // measured at stage scale, like the threshold
+  const dy = (t.clientY - touch.y) / scale;
+  touch = null;
+  if (Math.abs(dx) >= DECK.swipe_threshold_px && Math.abs(dx) > Math.abs(dy)) {
+    go(index + (dx < 0 ? 1 : -1));
+  }
+});
+
 fit();
+const initial = slideFromHash(location.hash);
+show(initial === null ? 0 : initial);
+setInterval(updatePacing, 1000);     // the elapsed clock ticks once a second
 </script>
 </body>
 </html>

@@ -209,6 +209,43 @@ def exhibit_keywords(block: dict) -> list[str]:
     return [str(w).strip().lower() for w in words if str(w).strip()]
 
 
+def _footer_problems(meta: dict) -> list[str]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Report a footer field too long for its box, so it is shortened in the
+        model instead of being clipped on every slide.
+
+    Details:
+        The field checked is the one the footer would show: meta.short_title in
+        place of meta.title, and meta.short_author in place of the authors joined
+        with ", ", whenever the short form is given. A short form that is itself
+        over the cap is therefore reported too.
+
+    Inputs:
+        meta (dict): model["meta"]
+
+    Outputs:
+        problems (list): one line per field over talk_rules.FOOTER_FIELD_MAX_CHARS
+    --------------------------------------------------------------------------
+    """
+    cap = rules.FOOTER_FIELD_MAX_CHARS
+    authors = meta.get("authors") or []
+    fields = (
+        ("title", "short_title", meta.get("short_title") or meta.get("title") or ""),
+        ("authors", "short_author",
+         meta.get("short_author") or ", ".join(str(a) for a in authors)),
+    )
+    problems = []
+    for name, short_key, shown in fields:
+        shown = str(shown).strip()
+        if len(shown) > cap:
+            problems.append(f"{TAG} the footer {name} is {len(shown)} characters, over the "
+                            f"{cap}-character footer box; give meta.{short_key} "
+                            f"(at most {cap})")
+    return problems
+
+
 def validate_model(model: dict, audience: str | None = None) -> list[str]:
     """
     --------------------------------------------------------------------------
@@ -233,6 +270,8 @@ def validate_model(model: dict, audience: str | None = None) -> list[str]:
         rules.audience_profile(audience)
     except ValueError as exc:
         problems.append(str(exc))
+
+    problems += _footer_problems(meta)
 
     slides = model.get("slides") or []
     if not slides:
@@ -683,8 +722,30 @@ def load_lab_assets(lab_dir: str) -> dict[str, str]:
             for role, name in rules.LAB_ASSET_FILES.items()}
 
 
+def slide_pacing(model: dict, wpm: float = rules.DEFAULT_WPM) -> list[float]:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        The spoken seconds of each slide, in the order a template renders them
+        (the model's own order), from the same budget_rows talk_notes agrees with.
+
+    Inputs:
+        model (dict): a parsed talk_model.json
+        wpm (float): delivery rate
+
+    Outputs:
+        pacing (list): seconds per slide, aligned with model["slides"]
+    --------------------------------------------------------------------------
+    """
+    # budget_rows sorts by slide number; a model listed out of order must still pair
+    # each rendered slide with its own seconds.
+    by_number = {row["slide"]: row["seconds"] for row in budget_rows(model, wpm)}
+    return [by_number[slide.get("n")] for slide in model.get("slides", [])]
+
+
 def render_template(model: dict, template_path: str, out_path: str, *,
-                    model_dir: str | None = None, lab_dir: str | None = None) -> str:
+                    model_dir: str | None = None, lab_dir: str | None = None,
+                    wpm: float = rules.DEFAULT_WPM) -> str:
     """
     --------------------------------------------------------------------------
     Purpose:
@@ -695,7 +756,9 @@ def render_template(model: dict, template_path: str, out_path: str, *,
     Details:
         For an .html output every figure is embedded as a data: URI, so the deck
         stays one file. Any other output keeps the plain asset paths. Every
-        template receives `sections` (outline_sections), what an outline lists. A
+        template receives `sections` (outline_sections), what an outline lists;
+        `pacing` (slide_pacing), the spoken seconds of each slide in rendering
+        order; and `web` (talk_rules.WEB_INTERACTION), the interaction values. A
         template whose header declares "requires: lab-assets" also receives `lab`,
         the banner and logo read from lab_dir; one that does not declare it
         renders exactly as before.
@@ -708,6 +771,7 @@ def render_template(model: dict, template_path: str, out_path: str, *,
             for an .html output that has figures
         lab_dir (str | None): the lab gabarit folder; required when the template
             declares "requires: lab-assets"
+        wpm (float): delivery rate the pacing is computed at
 
     Outputs:
         out_path (str): the file written
@@ -732,6 +796,8 @@ def render_template(model: dict, template_path: str, out_path: str, *,
                       declared["supported-kinds"])
     context = dict(model)
     context["sections"] = outline_sections(model)
+    context["pacing"] = slide_pacing(model, wpm)
+    context["web"] = dict(rules.WEB_INTERACTION)
     if "lab-assets" in declared["requires"]:
         if lab_dir is None:
             raise AssetError(f"{TAG} {name} requires the lab assets; pass the gabarit "
@@ -823,7 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             written = render_template(model, args.render, args.out,
                                       model_dir=os.path.dirname(os.path.abspath(args.model)),
-                                      lab_dir=args.lab_dir)
+                                      lab_dir=args.lab_dir, wpm=args.wpm)
         except (OSError, RuntimeError, RendererGap, AssetError) as exc:
             print(f"{TAG} {exc}", file=sys.stderr)
             return 2

@@ -170,6 +170,21 @@ LAB_ASSET_FILES: dict[str, str] = {
     "logo": "LogoLARI_FINAL.png",
 }
 
+# Interaction values the web deck's script reads, handed to the template as `web`
+# so the markup holds no number of its own (R0).
+# swipe_threshold_px: horizontal travel, in pixels at stage scale, before a single
+# touch counts as a swipe. Provenance: chosen by the operator, 2026-10-08 (Issue #53),
+# value taken from the Reveal.js reference study (commit e240e17).
+WEB_INTERACTION: dict[str, int] = {
+    "swipe_threshold_px": 40,
+}
+
+# Longest title or author line a footer box holds, in characters, before the model
+# must supply meta.short_title / meta.short_author. A field over it is reported rather
+# than clipped, the defect the compiled Beamer reference shows.
+# Provenance: chosen by the operator, 2026-10-08 (Issue #53).
+FOOTER_FIELD_MAX_CHARS = 48
+
 
 def word_count(text: str) -> int:
     """

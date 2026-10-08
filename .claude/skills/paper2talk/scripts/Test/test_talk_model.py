@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _fixtures as fx  # noqa: E402
@@ -254,6 +255,110 @@ class TestOutlineKind(unittest.TestCase):
         self.assertNotRegex(tex, r"\\begin\{itemize\}\s*\\end\{itemize\}")
 
 
+class TestTemplateContext(unittest.TestCase):
+    """The web template is handed its pacing and interaction values; it invents none."""
+
+    PROBE = ("{# supported-blocks: bullets figure #}\n"
+             "PACING={{ pacing | tojson }}\nSWIPE={{ web.swipe_threshold_px }}\n")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.template = os.path.join(self.base, "probe.html.j2")
+        with open(self.template, "w", encoding="utf8") as fh:
+            fh.write(self.PROBE)
+        # .txt: default Jinja delimiters (a .tex output switches them) and no figure
+        # embedding (only an .html output embeds), so the probe reads the raw context.
+        self.out = os.path.join(self.base, "out.txt")
+
+    def _slides(self, order=(1, 2, 3)):
+        words = {1: 65, 2: 130, 3: 43}
+        kinds = {1: "title", 2: "content", 3: "divider"}
+        return [{"n": n, "kind": kinds[n], "title": f"S{n}",
+                 "blocks": [BLOCK_SAMPLES["figure"]] if kinds[n] == "content" else [],
+                 "notes": " ".join(f"w{i}" for i in range(words[n]))} for n in order]
+
+    def _render(self, model, **kw):
+        tm.render_template(model, self.template, self.out, **kw)
+        with open(self.out, encoding="utf8") as fh:
+            lines = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
+        return json.loads(lines["PACING"]), lines["SWIPE"]
+
+    def test_the_operator_values_are_recorded(self):
+        self.assertEqual(rules.WEB_INTERACTION["swipe_threshold_px"], 40)
+        self.assertEqual(rules.FOOTER_FIELD_MAX_CHARS, 48)
+
+    def test_pacing_equals_the_budget_seconds_of_each_slide(self):
+        model = fx.model(self._slides())
+        pacing, _ = self._render(model)
+        expected = [row["seconds"] for row in tm.budget_rows(model)]
+        self.assertEqual(len(pacing), 3)
+        for got, want in zip(pacing, expected):
+            self.assertAlmostEqual(got, want, places=6)
+
+    def test_pacing_follows_the_order_the_slides_are_rendered_in(self):
+        # budget_rows sorts by number; the template iterates the model's own order.
+        model = fx.model(self._slides(order=(2, 1, 3)))
+        pacing, _ = self._render(model)
+        by_n = {row["slide"]: row["seconds"] for row in tm.budget_rows(model)}
+        for got, n in zip(pacing, (2, 1, 3)):
+            self.assertAlmostEqual(got, by_n[n], places=6)
+
+    def test_pacing_follows_the_delivery_rate(self):
+        model = fx.model(self._slides())
+        slow, _ = self._render(model, wpm=65.0)
+        normal, _ = self._render(model)
+        self.assertAlmostEqual(slow[1], 2 * normal[1], places=6)
+
+    def test_web_carries_the_swipe_threshold(self):
+        _, swipe = self._render(fx.model(self._slides()))
+        self.assertEqual(swipe, "40")
+
+    def test_the_rendered_value_comes_from_talk_rules(self):
+        # Proves the template is not holding its own copy of the number.
+        with mock.patch.dict(rules.WEB_INTERACTION, {"swipe_threshold_px": 77}):
+            _, swipe = self._render(fx.model(self._slides()))
+        self.assertEqual(swipe, "77")
+
+
+class TestFooterFields(unittest.TestCase):
+    """A footer field too long for its box is reported, not clipped (a Beamer defect)."""
+
+    LONG_TITLE = "A deliberately long fictitious title that cannot fit its footer box"
+    LONG_AUTHORS = ["Wick, J.", "Doe, A.", "Roe, B.", "Poe, C.", "Moe, D.", "Zoe, E."]
+
+    def _problems(self, **meta):
+        model = fx.model([{"n": 1, "kind": "content", "title": "S1",
+                           "blocks": [BLOCK_SAMPLES["figure"]], "notes": "blink"}], **meta)
+        return [p for p in tm.validate_model(model) if "footer" in p]
+
+    def test_the_fixture_fields_are_over_the_cap(self):
+        self.assertGreater(len(self.LONG_TITLE), rules.FOOTER_FIELD_MAX_CHARS)
+        self.assertGreater(len(", ".join(self.LONG_AUTHORS)), rules.FOOTER_FIELD_MAX_CHARS)
+
+    def test_a_long_title_without_a_short_form_is_reported(self):
+        problems = self._problems(title=self.LONG_TITLE)
+        self.assertTrue(any("short_title" in p for p in problems), problems)
+
+    def test_the_same_title_with_a_short_form_is_not(self):
+        self.assertEqual(self._problems(title=self.LONG_TITLE, short_title="Short title"), [])
+
+    def test_a_short_form_that_is_itself_too_long_is_reported(self):
+        problems = self._problems(title=self.LONG_TITLE, short_title=self.LONG_TITLE)
+        self.assertTrue(any("short_title" in p for p in problems), problems)
+
+    def test_long_authors_without_a_short_form_are_reported(self):
+        problems = self._problems(authors=self.LONG_AUTHORS)
+        self.assertTrue(any("short_author" in p for p in problems), problems)
+
+    def test_the_same_authors_with_a_short_form_are_not(self):
+        self.assertEqual(self._problems(authors=self.LONG_AUTHORS, short_author="Wick et al."),
+                         [])
+
+    def test_fields_within_the_cap_are_not_reported(self):
+        # Negative control: the default fixture title and author are short.
+        self.assertEqual(self._problems(), [])
+
+
 class TestNumberIntegrity(unittest.TestCase):
     """No number reaches a slide unless the paper states it."""
 
@@ -324,6 +429,12 @@ class TestAssetEmbedding(unittest.TestCase):
         self.outside = os.path.join(self.base, "outside.png")
         self._write(self.outside, PNG_BYTES)
         self.cap = 1024
+        # The web template requires the lab images (plan2 Task 6); a generated stand-in
+        # folder lets these figure tests reach the figure code they are about.
+        self.lab = os.path.join(self.base, "gabarit_slides")
+        os.makedirs(self.lab)
+        self._write(os.path.join(self.lab, rules.LAB_ASSET_FILES["banner"]), JPEG_BYTES)
+        self._write(os.path.join(self.lab, rules.LAB_ASSET_FILES["logo"]), PNG_BYTES)
 
     @staticmethod
     def _write(path, data):
@@ -389,7 +500,7 @@ class TestAssetEmbedding(unittest.TestCase):
         import talk_validate as tv
         model = self._figure_model()
         out = os.path.join(self.base, "deck.html")
-        tm.render_template(model, WEB_TEMPLATE, out, model_dir=self.root)
+        tm.render_template(model, WEB_TEMPLATE, out, model_dir=self.root, lab_dir=self.lab)
         with open(out, encoding="utf8") as fh:
             html = fh.read()
         self.assertIn('src="data:image/png;base64,', html)
@@ -399,9 +510,10 @@ class TestAssetEmbedding(unittest.TestCase):
         self.assertNotIn("data_uri", model["slides"][0]["blocks"][0])
 
     def test_a_web_render_with_figures_and_no_model_dir_is_refused(self):
-        with self.assertRaises(tm.AssetError):
+        with self.assertRaises(tm.AssetError) as ctx:
             tm.render_template(self._figure_model(), WEB_TEMPLATE,
-                               os.path.join(self.base, "deck.html"))
+                               os.path.join(self.base, "deck.html"), lab_dir=self.lab)
+        self.assertIn("model's folder", str(ctx.exception))
 
     def test_a_beamer_render_keeps_the_plain_asset_path(self):
         # Negative control: LaTeX resolves the file itself, so nothing is embedded.
@@ -418,7 +530,7 @@ class TestAssetEmbedding(unittest.TestCase):
         del model["slides"][0]["blocks"][0]["asset"]
         with self.assertRaises(tm.AssetError) as ctx:
             tm.render_template(model, WEB_TEMPLATE, os.path.join(self.base, "deck.html"),
-                               model_dir=self.root)
+                               model_dir=self.root, lab_dir=self.lab)
         self.assertIn("slide 1", str(ctx.exception))
 
     def test_the_cli_refuses_a_figure_without_an_asset_with_exit_2(self):
@@ -427,10 +539,12 @@ class TestAssetEmbedding(unittest.TestCase):
         path = os.path.join(self.root, "talk_model.json")
         with open(path, "w", encoding="utf8") as fh:
             json.dump(model, fh)
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            code = tm.main([path, "--render", WEB_TEMPLATE,
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = tm.main([path, "--render", WEB_TEMPLATE, "--lab-dir", self.lab,
                             "--out", os.path.join(self.base, "deck.html")])
         self.assertEqual(code, 2)
+        self.assertIn("no 'asset'", err.getvalue())
 
     def test_the_cli_refuses_a_missing_figure_with_exit_2(self):
         model = self._figure_model()
@@ -440,7 +554,7 @@ class TestAssetEmbedding(unittest.TestCase):
             json.dump(model, fh)
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = tm.main([path, "--render", WEB_TEMPLATE,
+            code = tm.main([path, "--render", WEB_TEMPLATE, "--lab-dir", self.lab,
                             "--out", os.path.join(self.base, "deck.html")])
         self.assertEqual(code, 2)
         self.assertIn("figures/absent.png", err.getvalue())

@@ -4,7 +4,10 @@ than hardcoded (env var first, then the newest cache match), the built-in checks
 fire on a dangling r:embed and on a chart with a secondary axis but no declared
 axes, and the web target refuses an external URL.
 """
+import contextlib
+import io
 import os
+import pathlib
 import sys
 import tempfile
 import time
@@ -258,6 +261,73 @@ class TestPaletteAndSize(unittest.TestCase):
         self.assertTrue(tv.check_size(path, max_mb=0.000001))
 
 
+class TestOpenAfterCheck(unittest.TestCase):
+    """--open hands a CLEAN web deck to the system browser; nothing else ever opens it.
+
+    webbrowser.open is patched in every case: no test here starts a browser.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.clean = self._html("clean.html", '<img src="data:image/png;base64,iVBORw0KG">')
+        self.bad = self._html("bad.html", '<img src="figures/fig1.png">')
+
+    def _html(self, name, body):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf8") as fh:
+            fh.write(body)
+        return path
+
+    def _main(self, argv, opener_result=True, opener_error=None):
+        err = io.StringIO()
+        with mock.patch.object(tv.webbrowser, "open", return_value=opener_result,
+                               side_effect=opener_error) as opener, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = tv.main(argv)
+        return code, opener, err.getvalue()
+
+    def test_a_clean_deck_with_open_is_opened_once_as_a_file_uri(self):
+        code, opener, _ = self._main(["--web", self.clean, "--open"])
+        self.assertEqual(code, 0)
+        opener.assert_called_once()
+        uri = opener.call_args.args[0]
+        self.assertTrue(uri.startswith("file:"), uri)
+        self.assertEqual(uri, pathlib.Path(os.path.abspath(self.clean)).as_uri())
+
+    def test_a_deck_with_findings_exits_1_and_never_opens(self):
+        code, opener, _ = self._main(["--web", self.bad, "--open"])
+        self.assertEqual(code, 1)
+        opener.assert_not_called()
+
+    def test_a_clean_deck_without_open_never_opens(self):
+        # Suppression is the absence of --open (the /talk --no-open opt-out drops it).
+        code, opener, _ = self._main(["--web", self.clean])
+        self.assertEqual(code, 0)
+        opener.assert_not_called()
+
+    def test_an_unreadable_deck_with_open_exits_2_and_never_opens(self):
+        code, opener, _ = self._main(["--web", os.path.join(self.dir, "absent.html"), "--open"])
+        self.assertEqual(code, 2)
+        opener.assert_not_called()
+
+    def test_open_without_web_is_a_usage_refusal(self):
+        code, opener, err = self._main(["--beamer", "main.tex", "--open"])
+        self.assertEqual(code, 2)
+        self.assertIn("--open", err)
+        opener.assert_not_called()
+
+    def test_a_browser_that_does_not_open_leaves_the_clean_verdict(self):
+        # The check passed; failing to launch a browser is said, not turned into a FAIL.
+        for result, error in ((False, None), (None, tv.webbrowser.Error("no browser"))):
+            with self.subTest(result=result, error=error):
+                code, opener, err = self._main(["--web", self.clean, "--open"],
+                                               opener_result=result, opener_error=error)
+                self.assertEqual(code, 0)
+                opener.assert_called_once()
+                self.assertIn("clean.html", err)
+                self.assertIn("by hand", err)
+
+
 class TestMainDispatch(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -267,6 +337,12 @@ class TestMainDispatch(unittest.TestCase):
         with open(bad, "w", encoding="utf8") as fh:
             fh.write('<script src="https://cdn.example/x.js"></script>')
         self.assertEqual(tv.main(["--web", bad]), 1)
+
+    def test_the_web_mode_without_open_is_unchanged(self):
+        clean = os.path.join(self.dir, "clean.html")
+        with open(clean, "w", encoding="utf8") as fh:
+            fh.write('<img src="data:image/png;base64,iVBORw0KG">')
+        self.assertEqual(tv.main(["--web", clean]), 0)
 
     def test_the_beamer_mode_hands_off_to_latex(self):
         self.assertEqual(tv.main(["--beamer", "main.tex"]), 0)

@@ -23,14 +23,16 @@ regression that matters.
 
 The other two targets are validated where their errors actually surface: a Beamer
 deck by its LaTeX log (hand off to /latex), and the web deck by the property that
-defines it - one self-contained file, so any external http(s) reference in src, href
-or url() is a failure.
+defines it - one self-contained file, so any external http(s), protocol-relative or
+relative reference in src, href or url() is a failure. With --open, a web deck that
+passes is handed to the default browser; one with findings is never opened.
 
 Usage
 -----
     python talk_validate.py deck.pptx --original gabarit.pptx --audience field
     python talk_validate.py deck.pptx --model talk_model.json
     python talk_validate.py --web deck.html
+    python talk_validate.py --web deck.html --open
     python talk_validate.py --beamer main.tex
 
 Exit codes: 0 clean, 1 a failure, 2 a usage or file error. Warnings (text-only
@@ -43,9 +45,11 @@ import argparse
 import glob
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
+import webbrowser
 import zipfile
 
 TAG = "[VALIDATE]"
@@ -462,6 +466,35 @@ def check_web(path: str) -> list[str]:
     return problems
 
 
+def open_in_browser(path: str) -> bool:
+    """
+    --------------------------------------------------------------------------
+    Purpose:
+        Hand a web deck that has already passed check_web to the system's default
+        browser, through the standard library; no browser is named here.
+
+    Details:
+        A browser that cannot be started is reported on stderr with the file to open
+        by hand. It does not change the validation verdict, which was already clean.
+
+    Inputs:
+        path (str): the .html deck
+
+    Outputs:
+        opened (bool): True when the browser accepted the file:// URI
+    --------------------------------------------------------------------------
+    """
+    uri = pathlib.Path(os.path.abspath(path)).as_uri()
+    try:
+        opened = bool(webbrowser.open(uri))
+    except webbrowser.Error as exc:
+        print(f"{TAG} could not start a browser ({exc}); open {path} by hand", file=sys.stderr)
+        return False
+    if not opened:
+        print(f"{TAG} no browser accepted the deck; open {path} by hand", file=sys.stderr)
+    return opened
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Validate a built deck before inspection.")
     ap.add_argument("deck", nargs="?", help="the built .pptx")
@@ -472,7 +505,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--beamer", help="a Beamer main.tex: hand off to /latex")
     ap.add_argument("--no-plugin", action="store_true",
                     help="skip the plugin validator and run the built-in checks")
+    ap.add_argument("--open", action="store_true",
+                    help="with --web: open the deck in the default browser, only if clean")
     args = ap.parse_args(argv)
+
+    if args.open and not args.web:
+        print(f"{TAG} --open applies to --web only: it opens a web deck after a clean check",
+              file=sys.stderr)
+        return 2
 
     if args.beamer:
         print(
@@ -491,7 +531,11 @@ def main(argv: list[str] | None = None) -> int:
         for line in problems:
             print(line, file=sys.stderr)
         print(f"{TAG} web target {'FAIL' if problems else 'clean'}")
-        return 1 if problems else 0
+        if problems:
+            return 1                      # a deck with findings is never opened
+        if args.open:
+            open_in_browser(args.web)
+        return 0
 
     if not args.deck:
         print(f"{TAG} give a deck, --web <file.html>, or --beamer <main.tex>", file=sys.stderr)
